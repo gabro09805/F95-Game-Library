@@ -619,6 +619,18 @@ class SyncTests(unittest.TestCase):
         self.old_db_path = app.DB_PATH
         app.DB_PATH = Path(self.temp_dir.name) / "library.sqlite3"
         app.initialize_db()
+        app.SYNC_QUEUE.clear()
+        app.SYNC_PENDING_CHANGES.clear()
+        app.SYNC_REPORT_GAME_IDS.clear()
+        app.SYNC_CURRENT_ID = None
+        app.SYNC_PROGRESS.update({
+            "active": False,
+            "completed": 0,
+            "total": 0,
+            "current_title": "",
+            "errors": 0,
+            "report_error": "",
+        })
         with app.database() as db:
             db.execute(
                 "INSERT INTO games (thread_url, title, created_at, updated_at, user_version_updated_at) VALUES (?, ?, ?, ?, ?)",
@@ -711,6 +723,83 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(game["likes"], 24)
         self.assertEqual(game["views"], 1200)
         self.assertEqual(game["f95_rating"], 4.5)
+
+    def test_sync_reports_version_and_completion_status_changes(self):
+        with app.database() as db:
+            db.execute(
+                """
+                UPDATE games
+                SET version = '1.0', latest_version = '1.0', game_status = 'Ongoing',
+                    thread_updated_at = '2026-01-01T00:00:00+00:00'
+                WHERE id = 1
+                """
+            )
+        metadata = {
+            "title": "Test",
+            "image_url": "",
+            "gallery": [],
+            "description": "Description",
+            "developer": "",
+            "version": "1.1",
+            "engine": "",
+            "game_status": "Completed",
+            "tags": [],
+            "thread_updated_at": "2026-10-28T00:00:00+00:00",
+        }
+        with patch.object(app, "fetch_thread_metadata", return_value=metadata):
+            progress = app.queue_sync_jobs([1])
+            self.assertTrue(progress["active"])
+            for _ in range(100):
+                if not app.get_sync_progress()["active"]:
+                    break
+                threading.Event().wait(0.01)
+
+        updated = app.get_game(1)
+        self.assertEqual(updated["latest_version"], "1.1")
+        self.assertEqual(updated["game_status"], "Completed")
+        reports = app.get_sync_reports()
+        self.assertEqual(len(reports["reports"]), 1)
+        changes = reports["reports"][0]["games"][0]["changes"]
+        self.assertIn(
+            {"field": "latest_version", "from": "1.0", "to": "1.1"},
+            changes,
+        )
+        self.assertIn(
+            {"field": "game_status", "from": "Ongoing", "to": "Completed"},
+            changes,
+        )
+
+    def test_initial_sync_after_adding_game_does_not_create_report(self):
+        updated_game = app.get_game(1)
+        updated_game["latest_version"] = "1.0"
+        with patch.object(app, "sync_game", return_value=updated_game):
+            app.queue_sync_jobs([1], report_changes=False)
+            for _ in range(100):
+                if not app.get_sync_progress()["active"]:
+                    break
+                threading.Event().wait(0.01)
+
+        self.assertFalse(app.get_sync_progress()["active"])
+        self.assertEqual(app.get_sync_reports()["reports"], [])
+
+    def test_sync_reports_are_persisted_and_read_by_cursor(self):
+        game = {
+            "id": 1,
+            "title": "Test",
+            "thread_url": "https://f95zone.to/threads/test.123/",
+            "image_url": "",
+            "changes": [{"field": "latest_version", "from": "1.0", "to": "1.1"}],
+        }
+        app.save_sync_report([game])
+        app.save_sync_report([game])
+
+        first_page = app.get_sync_reports(limit=1)
+        second_page = app.get_sync_reports(after_id=first_page["next_after_id"], limit=1)
+        self.assertEqual(len(first_page["reports"]), 1)
+        self.assertTrue(first_page["has_more"])
+        self.assertEqual(len(second_page["reports"]), 1)
+        self.assertFalse(second_page["has_more"])
+        self.assertEqual(first_page["epoch"], second_page["epoch"])
 
 
 class AppSettingsTests(unittest.TestCase):

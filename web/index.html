@@ -381,6 +381,18 @@
       </form>
     </dialog>
 
+    <dialog class="modal sync-summary-modal" id="sync-summary-modal" aria-labelledby="sync-summary-title">
+      <header class="sync-summary-header">
+        <div class="sync-summary-icon" aria-hidden="true">✓</div>
+        <div><p class="eyebrow">SINCRONIZZAZIONE COMPLETATA</p><h2 id="sync-summary-title">Aggiornamenti rilevati</h2><p id="sync-summary-description"></p></div>
+        <button type="button" class="icon-button" id="sync-summary-close" aria-label="Chiudi riepilogo">×</button>
+      </header>
+      <div id="sync-summary-list" class="sync-summary-list"></div>
+      <div class="modal-actions sync-summary-actions">
+        <button type="button" class="button button-primary" id="sync-summary-done">Chiudi</button>
+      </div>
+    </dialog>
+
     <dialog class="modal detail-modal" id="detail-modal">
       <div id="detail-content"></div>
     </dialog>

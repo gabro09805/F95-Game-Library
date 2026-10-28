@@ -6,6 +6,7 @@ import re
 import sqlite3
 import threading
 import time
+import uuid
 from http.cookiejar import Cookie, CookieJar
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -40,12 +41,15 @@ SETTINGS_CHANGED = threading.Event()
 SYNC_PROGRESS_LOCK = threading.Lock()
 SYNC_QUEUE = []
 SYNC_CURRENT_ID = None
+SYNC_PENDING_CHANGES = []
+SYNC_REPORT_GAME_IDS = set()
 SYNC_PROGRESS = {
     "active": False,
     "completed": 0,
     "total": 0,
     "current_title": "",
     "errors": 0,
+    "report_error": "",
 }
 CATALOG_FILTER_CACHE = {"expires_at": 0, "options": None}
 CATALOG_FILTER_LOCK = threading.Lock()
@@ -1595,12 +1599,25 @@ def initialize_db():
             "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
         )
         db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sync_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                games TEXT NOT NULL
+            )
+            """
+        )
+        db.execute(
             "INSERT OR IGNORE INTO settings (key, value) VALUES ('sync_mode', ?)",
             (DEFAULT_SYNC_MODE,),
         )
         db.execute(
             "INSERT OR IGNORE INTO settings (key, value) VALUES ('sync_interval', ?)",
             (str(DEFAULT_SYNC_INTERVAL),),
+        )
+        db.execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES ('sync_report_epoch', ?)",
+            (uuid.uuid4().hex,),
         )
         columns = {row["name"] for row in db.execute("PRAGMA table_info(games)")}
         if "title_override" not in columns:
@@ -1772,7 +1789,7 @@ def sync_game(game_id):
                         views = CASE WHEN ? > 0 THEN ? ELSE views END,
                         developer = CASE WHEN developer = '' THEN ? ELSE developer END,
                         engine = CASE WHEN engine = '' THEN ? ELSE engine END,
-                        game_status = CASE WHEN game_status = '' THEN ? ELSE game_status END,
+                        game_status = COALESCE(NULLIF(?, ''), game_status),
                         tags = CASE WHEN tags = '[]' THEN ? ELSE tags END,
                         thread_updated_at = COALESCE(?, thread_updated_at),
                         last_checked_at = ?, last_error = '',
@@ -1809,11 +1826,100 @@ def get_sync_progress():
         return {**SYNC_PROGRESS}
 
 
+def build_sync_changes(previous, current):
+    changes = []
+    for field in ("latest_version", "game_status", "title"):
+        previous_value = previous.get(field) or (previous.get("version", "") if field == "latest_version" else "")
+        current_value = current.get(field) or (current.get("version", "") if field == "latest_version" else "")
+        if current_value and previous_value != current_value:
+            changes.append({
+                "field": field,
+                "from": previous_value or "",
+                "to": current_value,
+            })
+    previous_timestamp = previous.get("thread_updated_at")
+    current_timestamp = current.get("thread_updated_at")
+    if previous_timestamp and current_timestamp and current_timestamp > previous_timestamp:
+        changes.append({
+            "field": "thread_updated_at",
+            "from": previous_timestamp,
+            "to": current_timestamp,
+        })
+    previous_image = previous.get("image_url")
+    current_image = current.get("image_url")
+    if current_image and previous_image != current_image:
+        changes.append({
+            "field": "image_url",
+            "from": previous_image or "",
+            "to": current_image,
+        })
+    if not changes:
+        return None
+    return {
+        "id": current["id"],
+        "title": current["title"],
+        "thread_url": current["thread_url"],
+        "image_url": current.get("image_url", ""),
+        "changes": changes,
+    }
+
+
+def save_sync_report(games):
+    if not games:
+        return None
+    with database() as db:
+        cursor = db.execute(
+            "INSERT INTO sync_reports (created_at, games) VALUES (?, ?)",
+            (now_iso(), json.dumps(games, ensure_ascii=False)),
+        )
+        return cursor.lastrowid
+
+
+def get_sync_reports(after_id=0, limit=50):
+    with database() as db:
+        rows = db.execute(
+            "SELECT id, created_at, games FROM sync_reports WHERE id > ? ORDER BY id LIMIT ?",
+            (after_id, limit),
+        ).fetchall()
+        reports = []
+        for row in rows:
+            try:
+                games = json.loads(row["games"])
+            except json.JSONDecodeError as exc:
+                raise ValueError("Un riepilogo di sincronizzazione salvato non è leggibile.") from exc
+            if not isinstance(games, list):
+                raise ValueError("Un riepilogo di sincronizzazione salvato non è valido.")
+            reports.append({
+                "id": row["id"],
+                "created_at": row["created_at"],
+                "games": games,
+            })
+        next_after_id = reports[-1]["id"] if reports else after_id
+        has_more = db.execute(
+            "SELECT 1 FROM sync_reports WHERE id > ? LIMIT 1",
+            (next_after_id,),
+        ).fetchone() is not None
+    return {
+        "reports": reports,
+        "next_after_id": next_after_id,
+        "has_more": has_more,
+        "epoch": read_setting("sync_report_epoch"),
+    }
+
+
 def run_sync_queue():
     global SYNC_CURRENT_ID
     while True:
         with SYNC_PROGRESS_LOCK:
             if not SYNC_QUEUE:
+                if SYNC_PENDING_CHANGES:
+                    try:
+                        save_sync_report(SYNC_PENDING_CHANGES)
+                    except sqlite3.Error as exc:
+                        SYNC_PROGRESS["report_error"] = str(exc)
+                        print(f"Errore durante il salvataggio del riepilogo di sincronizzazione: {exc}", flush=True)
+                    SYNC_PENDING_CHANGES.clear()
+                SYNC_REPORT_GAME_IDS.clear()
                 SYNC_PROGRESS["active"] = False
                 SYNC_PROGRESS["current_title"] = ""
                 SYNC_CURRENT_ID = None
@@ -1824,10 +1930,16 @@ def run_sync_queue():
         with SYNC_PROGRESS_LOCK:
             SYNC_PROGRESS["current_title"] = game["title"] if game else ""
         try:
+            previous = game
             result = sync_game(game_id)
             if result and result.get("last_error"):
                 with SYNC_PROGRESS_LOCK:
                     SYNC_PROGRESS["errors"] += 1
+            elif result and previous:
+                changes = build_sync_changes(previous, result)
+                with SYNC_PROGRESS_LOCK:
+                    if changes and game_id in SYNC_REPORT_GAME_IDS:
+                        SYNC_PENDING_CHANGES.append(changes)
         except Exception as exc:
             print(f"Errore durante la sincronizzazione del gioco {game_id}: {exc}", flush=True)
             with database() as db:
@@ -1843,7 +1955,7 @@ def run_sync_queue():
                 SYNC_CURRENT_ID = None
 
 
-def queue_sync_jobs(game_ids=None):
+def queue_sync_jobs(game_ids=None, *, report_changes=True):
     global SYNC_CURRENT_ID
     if game_ids is None:
         requested_ids = [game["id"] for game in list_games()]
@@ -1864,7 +1976,12 @@ def queue_sync_jobs(game_ids=None):
                 "total": 0,
                 "current_title": "",
                 "errors": 0,
+                "report_error": "",
             })
+            SYNC_PENDING_CHANGES.clear()
+            SYNC_REPORT_GAME_IDS.clear()
+        if report_changes:
+            SYNC_REPORT_GAME_IDS.update(requested_ids)
         SYNC_QUEUE.extend(new_ids)
         SYNC_PROGRESS["total"] += len(new_ids)
         should_start_worker = not previously_active
@@ -1875,6 +1992,7 @@ def queue_sync_jobs(game_ids=None):
         except RuntimeError as exc:
             with SYNC_PROGRESS_LOCK:
                 SYNC_QUEUE.clear()
+                SYNC_REPORT_GAME_IDS.clear()
                 SYNC_PROGRESS["active"] = False
                 SYNC_PROGRESS["total"] = SYNC_PROGRESS["completed"]
             raise RuntimeError("Impossibile avviare il processo di aggiornamento.") from exc
@@ -2067,6 +2185,20 @@ class LibraryHandler(SimpleHTTPRequestHandler):
         if parts.path == "/api/sync/status":
             self.send_json(get_sync_progress())
             return
+        if parts.path == "/api/sync/reports":
+            query = parse_qs(parts.query)
+            after_id_value = query.get("after_id", ["0"])[0]
+            if not after_id_value.isdigit():
+                self.send_json({"error": "ID del riepilogo non valido."}, 400)
+                return
+            try:
+                report_epoch = read_setting("sync_report_epoch")
+                if query.get("epoch", [""])[0] != report_epoch:
+                    after_id_value = "0"
+                self.send_json(get_sync_reports(int(after_id_value)))
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, 500)
+            return
         if parts.path.startswith("/api/games/"):
             try:
                 game_id = int(parts.path.rsplit("/", 1)[1])
@@ -2151,7 +2283,7 @@ class LibraryHandler(SimpleHTTPRequestHandler):
                     )
                     game_id = cursor.lastrowid
                 game = get_game(game_id)
-                queue_sync_jobs([game_id])
+                queue_sync_jobs([game_id], report_changes=False)
                 self.send_json(game, 201)
                 return
             if parts.path == "/api/sync":

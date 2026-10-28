@@ -9,6 +9,7 @@ const statusNames = {
 const catalogDateLimits = [0, 365, 180, 90, 30, 14, 7, 3, 1];
 const LIBRARY_SORT_STORAGE_KEY = "f95-library-sort";
 const LIBRARY_SORT_FIELDS = ["name", "updated", "added", "rating", "likes", "views"];
+const SYNC_REPORT_CURSOR_KEY = "f95-library-sync-report-cursor";
 
 function catalogDateLabel(days) {
   if (!days) return "SEMPRE";
@@ -62,6 +63,7 @@ const settingsModal = document.querySelector("#settings-modal");
 const detailModal = document.querySelector("#detail-modal");
 const metadataModal = document.querySelector("#metadata-modal");
 const deleteConfirmModal = document.querySelector("#delete-confirm-modal");
+const syncSummaryModal = document.querySelector("#sync-summary-modal");
 const filtersModal = document.querySelector("#filters-modal");
 const catalogFiltersModal = document.querySelector("#catalog-filters-modal");
 const THEME_STORAGE_KEY = "f95-library-theme";
@@ -70,6 +72,11 @@ let catalogSearchTimer;
 let syncStatusWasActive = false;
 let syncStatusPollFailed = false;
 let syncStatusPollInFlight = false;
+let syncReportsPollInFlight = false;
+let syncReportsPollFailed = false;
+let syncReportCursor = 0;
+let syncReportEpoch = "";
+let syncReportSaveFailed = false;
 let catalogSyncPending = false;
 let syncNoticeTimeout;
 let draftFilters = null;
@@ -1205,6 +1212,118 @@ function renderSyncProgress(progress) {
   syncStatusWasActive = Boolean(progress.active);
 }
 
+function initializeSyncReportCursor() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SYNC_REPORT_CURSOR_KEY) || "null");
+    if (saved && Number.isSafeInteger(saved.cursor) && saved.cursor >= 0 && typeof saved.epoch === "string") {
+      syncReportCursor = saved.cursor;
+      syncReportEpoch = saved.epoch;
+    }
+  } catch {
+    syncReportCursor = 0;
+    syncReportEpoch = "";
+  }
+}
+
+function saveSyncReportCursor(cursor, epoch) {
+  syncReportCursor = cursor;
+  syncReportEpoch = epoch;
+  try {
+    localStorage.setItem(SYNC_REPORT_CURSOR_KEY, JSON.stringify({ cursor, epoch }));
+  } catch (error) {
+    showNotice(`Impossibile salvare la lettura del riepilogo: ${error.message}`, true);
+  }
+}
+
+function syncChangeLabel(field) {
+  return {
+    latest_version: "Versione",
+    game_status: "Stato",
+    title: "Titolo",
+    thread_updated_at: "Data aggiornamento thread",
+    image_url: "Copertina",
+  }[field] || field;
+}
+
+function syncChangeValue(change, value) {
+  if (!value) return "Non rilevato";
+  if (change.field === "latest_version") return `v${value}`;
+  if (change.field === "thread_updated_at") return updateDate(value);
+  if (change.field === "image_url") return value === change.to ? "Aggiornata" : "Precedente";
+  return value;
+}
+
+function renderSyncReports(reports) {
+  const gameCount = reports.reduce((total, report) => total + report.games.length, 0);
+  const changeCount = reports.reduce(
+    (total, report) => total + report.games.reduce((gameTotal, game) => gameTotal + game.changes.length, 0),
+    0,
+  );
+  document.querySelector("#sync-summary-description").textContent =
+    `${gameCount} ${gameCount === 1 ? "gioco con aggiornamenti" : "giochi con aggiornamenti"} · ${changeCount} ${changeCount === 1 ? "modifica rilevata" : "modifiche rilevate"}`;
+  document.querySelector("#sync-summary-list").innerHTML = reports.map((report) => `
+    <section class="sync-report-group">
+      <header><time datetime="${escapeHtml(report.created_at)}">${escapeHtml(updateDate(report.created_at))}</time><span>${report.games.length} ${report.games.length === 1 ? "gioco" : "giochi"}</span></header>
+      <div class="sync-report-games">
+        ${report.games.map((game) => `
+          <article class="sync-report-game">
+            ${game.image_url
+              ? `<img src="${escapeHtml(imageSource(game.image_url))}" alt="" loading="lazy" onerror="this.remove()">`
+              : '<div class="sync-report-cover-fallback" aria-hidden="true">F</div>'}
+            <div class="sync-report-game-content">
+              <a class="sync-report-game-title" href="${escapeHtml(game.thread_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(game.title)}</a>
+              <ul>${game.changes.map((change) => `
+                <li class="${change.field === "game_status" && change.to.toLowerCase() === "completed" ? "sync-report-completed" : ""}">
+                  <strong>${escapeHtml(syncChangeLabel(change.field))}</strong>
+                  <span>${escapeHtml(syncChangeValue(change, change.from))} <span aria-hidden="true">→</span> ${escapeHtml(syncChangeValue(change, change.to))}</span>
+                </li>`).join("")}</ul>
+            </div>
+          </article>`).join("")}
+      </div>
+    </section>`).join("");
+  syncSummaryModal.showModal();
+}
+
+async function pollSyncReports() {
+  if (syncReportsPollInFlight || syncSummaryModal.open) return;
+  syncReportsPollInFlight = true;
+  try {
+    const reports = [];
+    let cursor = syncReportCursor;
+    let epoch = syncReportEpoch;
+    let hasMore = true;
+    while (hasMore) {
+      const page = await api(`/api/sync/reports?after_id=${cursor}&epoch=${encodeURIComponent(epoch)}`);
+      if (epoch && page.epoch !== epoch) {
+        epoch = page.epoch;
+        cursor = 0;
+        reports.length = 0;
+        hasMore = true;
+        continue;
+      }
+      epoch = page.epoch;
+      reports.push(...page.reports);
+      hasMore = page.has_more;
+      if (hasMore && page.next_after_id <= cursor) {
+        throw new Error("Il riepilogo di sincronizzazione non avanza alla pagina successiva.");
+      }
+      cursor = page.next_after_id;
+    }
+    syncReportsPollFailed = false;
+    if (reports.length) {
+      saveSyncReportCursor(cursor, epoch);
+      renderSyncReports(reports);
+    } else if (epoch !== syncReportEpoch) {
+      saveSyncReportCursor(cursor, epoch);
+    }
+  } catch (error) {
+    if (!syncReportsPollFailed) showNotice(`Impossibile caricare il riepilogo degli aggiornamenti: ${error.message}`, true);
+    syncReportsPollFailed = true;
+  } finally {
+    syncReportsPollInFlight = false;
+  }
+}
+
 async function pollSyncProgress() {
   if (syncStatusPollInFlight) return;
   syncStatusPollInFlight = true;
@@ -1213,6 +1332,12 @@ async function pollSyncProgress() {
     const wasActive = syncStatusWasActive;
     renderSyncProgress(progress);
     syncStatusPollFailed = false;
+    if (progress.report_error && !syncReportSaveFailed) {
+      showNotice(`Impossibile salvare il riepilogo degli aggiornamenti: ${progress.report_error}`, true);
+      syncReportSaveFailed = true;
+    } else if (!progress.report_error) {
+      syncReportSaveFailed = false;
+    }
     if (catalogSyncPending && !progress.active) {
       catalogSyncPending = false;
       const catalogNotice = document.querySelector("#catalog-notice");
@@ -1236,6 +1361,7 @@ async function pollSyncProgress() {
         }, 5000);
       }
     }
+    if (!progress.active) await pollSyncReports();
   } catch (error) {
     if (!syncStatusPollFailed) showNotice(`Impossibile leggere l'avanzamento: ${error.message}`, true);
     syncStatusPollFailed = true;
@@ -1354,6 +1480,11 @@ document.querySelector("#sort-direction").addEventListener("click", () => {
 document.querySelectorAll(".close-modal").forEach((button) => button.addEventListener("click", () => addModal.close()));
 document.querySelector("#settings-back").addEventListener("click", () => settingsModal.close());
 document.querySelectorAll(".close-metadata").forEach((button) => button.addEventListener("click", () => metadataModal.close()));
+document.querySelector("#sync-summary-close").addEventListener("click", () => syncSummaryModal.close());
+document.querySelector("#sync-summary-done").addEventListener("click", () => syncSummaryModal.close());
+syncSummaryModal.addEventListener("click", (event) => {
+  if (event.target === syncSummaryModal) syncSummaryModal.close();
+});
 document.querySelector("#settings-login-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const username = document.querySelector("#f95-username").value;
@@ -1596,6 +1727,7 @@ detailModal.addEventListener("click", (event) => {
 
 initializeTheme();
 restoreLibrarySort();
+initializeSyncReportCursor();
 loadGames().catch((error) => showNotice(error.message, true));
 api("/api/filters")
   .then((options) => populateQuickStatus(options.game_statuses))
