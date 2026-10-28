@@ -713,6 +713,56 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(game["f95_rating"], 4.5)
 
 
+class AppSettingsTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.old_db_path = app.DB_PATH
+        app.DB_PATH = Path(self.temp_dir.name) / "library.sqlite3"
+        app.initialize_db()
+        self.addCleanup(self.cleanup_database)
+
+    def cleanup_database(self):
+        app.DB_PATH = self.old_db_path
+        self.temp_dir.cleanup()
+
+    def test_update_schedule_defaults_to_six_hours(self):
+        self.assertEqual(
+            app.get_sync_settings(),
+            {"sync_mode": "hours", "sync_interval": 6},
+        )
+        self.assertEqual(
+            app.sync_interval_seconds(app.get_sync_settings()),
+            6 * 60 * 60,
+        )
+
+    def test_update_schedule_supports_manual_days_and_months(self):
+        self.assertEqual(
+            app.validate_sync_settings({"sync_mode": "manual", "sync_interval": ""}),
+            {"sync_mode": "manual", "sync_interval": 6},
+        )
+        self.assertIsNone(
+            app.sync_interval_seconds({"sync_mode": "manual", "sync_interval": 6})
+        )
+        self.assertEqual(
+            app.sync_interval_seconds({"sync_mode": "days", "sync_interval": 2}),
+            2 * 24 * 60 * 60,
+        )
+        self.assertEqual(
+            app.sync_interval_seconds({"sync_mode": "months", "sync_interval": 1}),
+            30 * 24 * 60 * 60,
+        )
+
+    def test_update_schedule_rejects_invalid_mode_and_interval(self):
+        for settings in (
+            {"sync_mode": "weeks", "sync_interval": 1},
+            {"sync_mode": "hours", "sync_interval": 0},
+            {"sync_mode": "days", "sync_interval": 10000},
+            {"sync_mode": ["manual"], "sync_interval": 1},
+        ):
+            with self.subTest(settings=settings), self.assertRaises(ValueError):
+                app.validate_sync_settings(settings)
+
+
 class F95LoginTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()

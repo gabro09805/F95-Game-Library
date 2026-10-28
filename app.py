@@ -21,7 +21,9 @@ from urllib.request import HTTPCookieProcessor, HTTPRedirectHandler, Request, bu
 ROOT = Path(__file__).resolve().parent
 WEB_ROOT = ROOT / "web"
 DB_PATH = Path(os.environ.get("DATA_DIR") or ROOT / "data") / "library.sqlite3"
-SYNC_INTERVAL_SECONDS = max(60, int(os.environ.get("SYNC_INTERVAL_SECONDS", "21600")))
+SYNC_MODES = {"manual", "hours", "days", "months"}
+DEFAULT_SYNC_MODE = "hours"
+DEFAULT_SYNC_INTERVAL = 6
 ALLOWED_HOSTS = {"f95zone.to", "www.f95zone.to"}
 ALLOWED_IMAGE_HOSTS = {
     *ALLOWED_HOSTS,
@@ -34,6 +36,7 @@ MAX_PAGE_BYTES = 4 * 1024 * 1024
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 DEV_MODE = os.environ.get("DEV_MODE") == "1"
 SYNC_LOCK = threading.Lock()
+SETTINGS_CHANGED = threading.Event()
 SYNC_PROGRESS_LOCK = threading.Lock()
 SYNC_QUEUE = []
 SYNC_CURRENT_ID = None
@@ -1306,6 +1309,39 @@ def read_setting(key):
     return row["value"] if row else None
 
 
+def get_sync_settings():
+    mode = read_setting("sync_mode") or DEFAULT_SYNC_MODE
+    try:
+        interval = int(read_setting("sync_interval") or DEFAULT_SYNC_INTERVAL)
+    except ValueError:
+        mode, interval = DEFAULT_SYNC_MODE, DEFAULT_SYNC_INTERVAL
+    if mode not in SYNC_MODES or not 1 <= interval <= 9999:
+        mode, interval = DEFAULT_SYNC_MODE, DEFAULT_SYNC_INTERVAL
+    return {"sync_mode": mode, "sync_interval": interval}
+
+
+def validate_sync_settings(data):
+    mode = data.get("sync_mode")
+    if not isinstance(mode, str) or mode not in SYNC_MODES:
+        raise ValueError("Seleziona una frequenza di aggiornamento valida.")
+    interval = data.get("sync_interval")
+    if mode == "manual" and (isinstance(interval, bool) or not str(interval).isdigit() or not 1 <= int(interval) <= 9999):
+        interval = DEFAULT_SYNC_INTERVAL
+    if isinstance(interval, bool) or not str(interval).isdigit():
+        raise ValueError("Inserisci un numero valido per l'intervallo.")
+    interval = int(interval)
+    if not 1 <= interval <= 9999:
+        raise ValueError("L'intervallo deve essere compreso tra 1 e 9999.")
+    return {"sync_mode": mode, "sync_interval": interval}
+
+
+def sync_interval_seconds(settings):
+    unit_seconds = {"hours": 60 * 60, "days": 24 * 60 * 60, "months": 30 * 24 * 60 * 60}
+    if settings["sync_mode"] == "manual":
+        return None
+    return settings["sync_interval"] * unit_seconds[settings["sync_mode"]]
+
+
 def save_f95_session(cookie_jar, username):
     serialized = serialize_cookie_jar(cookie_jar)
     if not has_auth_cookie(cookie_jar):
@@ -1557,6 +1593,14 @@ def initialize_db():
         )
         db.execute(
             "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        db.execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES ('sync_mode', ?)",
+            (DEFAULT_SYNC_MODE,),
+        )
+        db.execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES ('sync_interval', ?)",
+            (str(DEFAULT_SYNC_INTERVAL),),
         )
         columns = {row["name"] for row in db.execute("PRAGMA table_info(games)")}
         if "title_override" not in columns:
@@ -1838,12 +1882,33 @@ def queue_sync_jobs(game_ids=None):
 
 
 def sync_worker():
+    last_sync = None
+    previous_settings = None
     while True:
+        settings = get_sync_settings()
+        setting_key = (settings["sync_mode"], settings["sync_interval"])
+        if setting_key != previous_settings:
+            if previous_settings is not None and settings["sync_mode"] != "manual":
+                last_sync = time.monotonic()
+            previous_settings = setting_key
+        if settings["sync_mode"] == "manual":
+            SETTINGS_CHANGED.wait()
+            SETTINGS_CHANGED.clear()
+            continue
+        if last_sync is not None:
+            interval_seconds = sync_interval_seconds(settings)
+            remaining = interval_seconds - (time.monotonic() - last_sync)
+            if remaining > 0 and SETTINGS_CHANGED.wait(min(remaining, 24 * 60 * 60)):
+                SETTINGS_CHANGED.clear()
+                continue
+            if remaining > 24 * 60 * 60:
+                continue
+            SETTINGS_CHANGED.clear()
         try:
             sync_all_games()
         except Exception as exc:
             print(f"Errore durante il controllo periodico F95Zone: {exc}", flush=True)
-        time.sleep(SYNC_INTERVAL_SECONDS)
+        last_sync = time.monotonic()
 
 
 def parse_json_body(handler):
@@ -2030,6 +2095,9 @@ class LibraryHandler(SimpleHTTPRequestHandler):
         if parts.path == "/api/settings/auth":
             self.send_json(f95_session_status())
             return
+        if parts.path == "/api/settings":
+            self.send_json(get_sync_settings())
+            return
         if parts.path.startswith("/api/"):
             self.send_json({"error": "Endpoint non trovato."}, 404)
             return
@@ -2044,6 +2112,20 @@ class LibraryHandler(SimpleHTTPRequestHandler):
             if parts.path == "/api/settings/login":
                 status = login_f95zone(data.get("username"), data.get("password"))
                 self.send_json(status)
+                return
+            if parts.path == "/api/settings":
+                settings = validate_sync_settings(data)
+                with database() as db:
+                    db.execute(
+                        "INSERT OR REPLACE INTO settings (key, value) VALUES ('sync_mode', ?)",
+                        (settings["sync_mode"],),
+                    )
+                    db.execute(
+                        "INSERT OR REPLACE INTO settings (key, value) VALUES ('sync_interval', ?)",
+                        (str(settings["sync_interval"]),),
+                    )
+                SETTINGS_CHANGED.set()
+                self.send_json(settings)
                 return
             if parts.path == "/api/games":
                 thread_url = normalize_thread_url(data.get("thread_url"))

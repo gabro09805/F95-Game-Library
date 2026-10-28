@@ -282,11 +282,14 @@
       </form>
     </dialog>
 
-    <dialog class="modal" id="settings-modal">
+    <dialog class="modal settings-modal" id="settings-modal">
+      <header class="settings-page-header">
+        <button type="button" class="button button-quiet" id="settings-back">← Libreria</button>
+        <div><p class="eyebrow">PREFERENZE APPLICAZIONE</p><h1>Impostazioni</h1></div>
+      </header>
       <form id="settings-login-form">
-        <div class="modal-heading">
-          <div><p class="eyebrow">ACCOUNT F95ZONE</p><h2>Impostazioni</h2></div>
-          <button type="button" class="icon-button close-settings" aria-label="Chiudi">×</button>
+        <div class="settings-section-heading">
+          <div><p class="eyebrow">ACCOUNT F95ZONE</p><h3>Accesso</h3></div>
         </div>
         <p class="settings-description">Collega il tuo account per leggere i thread riservati agli utenti autenticati. La password viene inoltrata a F95Zone via HTTPS solo durante l'accesso e non viene conservata; resta memorizzata solo la sessione nel volume locale dell'app.</p>
         <div id="auth-connected" class="auth-connected hidden">
@@ -303,10 +306,42 @@
         </div>
         <div class="modal-error hidden" id="auth-error" role="alert"></div>
         <div class="modal-actions">
-          <button type="button" class="button button-quiet close-settings">Chiudi</button>
           <button type="submit" class="button button-primary" id="login-button">Accedi a F95Zone</button>
         </div>
       </form>
+      <section class="settings-section">
+        <div class="settings-section-heading">
+          <div><p class="eyebrow">ASPETTO</p><h3>Tema</h3></div>
+        </div>
+        <label class="field-label" for="theme-select">Tema dell'applicazione</label>
+        <select id="theme-select" class="settings-select">
+          <option value="dark">Scuro</option>
+          <option value="light">Chiaro</option>
+        </select>
+        <p class="field-hint">La scelta viene salvata in questo browser.</p>
+      </section>
+      <section class="settings-section">
+        <div class="settings-section-heading">
+          <div><p class="eyebrow">AGGIORNAMENTI</p><h3>Controllo dei thread</h3></div>
+        </div>
+        <label class="field-label" for="sync-mode">Aggiorna automaticamente</label>
+        <select id="sync-mode" class="settings-select">
+          <option value="manual">Manuale</option>
+          <option value="hours">Ore</option>
+          <option value="days">Giorni</option>
+          <option value="months">Mesi</option>
+        </select>
+        <div id="sync-interval-group" class="settings-interval hidden">
+          <label class="field-label" for="sync-interval">Ogni</label>
+          <input id="sync-interval" type="number" min="1" max="9999" step="1" value="6" inputmode="numeric">
+          <span id="sync-interval-unit">ore</span>
+        </div>
+        <p class="field-hint">La sincronizzazione manuale resta disponibile con il pulsante ⟳. Un mese equivale a 30 giorni.</p>
+        <div class="modal-error hidden" id="settings-error" role="alert"></div>
+        <div class="modal-actions">
+          <button type="button" class="button button-primary" id="save-settings">Salva impostazioni</button>
+        </div>
+      </section>
     </dialog>
 
     <dialog class="modal metadata-modal" id="metadata-modal">

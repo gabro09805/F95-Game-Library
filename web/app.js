@@ -7,6 +7,8 @@ const statusNames = {
   dropped: "Abbandonati",
 };
 const catalogDateLimits = [0, 365, 180, 90, 30, 14, 7, 3, 1];
+const LIBRARY_SORT_STORAGE_KEY = "f95-library-sort";
+const LIBRARY_SORT_FIELDS = ["name", "updated", "added", "rating", "likes", "views"];
 
 function catalogDateLabel(days) {
   if (!days) return "SEMPRE";
@@ -61,6 +63,7 @@ const detailModal = document.querySelector("#detail-modal");
 const metadataModal = document.querySelector("#metadata-modal");
 const filtersModal = document.querySelector("#filters-modal");
 const catalogFiltersModal = document.querySelector("#catalog-filters-modal");
+const THEME_STORAGE_KEY = "f95-library-theme";
 let searchTimer;
 let catalogSearchTimer;
 let syncStatusWasActive = false;
@@ -194,6 +197,31 @@ function renderSortDirection() {
   button.title = `Inverti ordine (${sortOrderLabel()})`;
   button.setAttribute("aria-label", `Inverti ordine (${sortOrderLabel()})`);
   document.querySelector("#sort-order-label").textContent = sortOrderLabel();
+}
+
+function restoreLibrarySort() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(LIBRARY_SORT_STORAGE_KEY) || "null");
+    if (saved && LIBRARY_SORT_FIELDS.includes(saved.sort) && ["asc", "desc"].includes(saved.direction)) {
+      state.sort = saved.sort;
+      state.direction = saved.direction;
+    }
+  } catch {
+    // Keep the default sorting when browser storage is unavailable or invalid.
+  }
+  document.querySelector("#sort-select").value = state.sort;
+  renderSortDirection();
+}
+
+function saveLibrarySort() {
+  try {
+    localStorage.setItem(LIBRARY_SORT_STORAGE_KEY, JSON.stringify({
+      sort: state.sort,
+      direction: state.direction,
+    }));
+  } catch (error) {
+    showNotice(`Impossibile salvare l'ordinamento in questo browser: ${error.message}`, true);
+  }
 }
 
 async function loadGames() {
@@ -346,6 +374,36 @@ function renderCatalog() {
   }
 }
 
+function renderDetailTags(tags) {
+  if (!tags?.length) return "";
+  const badges = tags.map((tag) => `<span class="metadata-badge">${escapeHtml(tag)}</span>`).join("");
+  return `<div class="detail-tags" data-detail-tags>
+    <div class="detail-meta detail-tag-list">${badges}</div>
+    <button type="button" class="button button-quiet detail-tags-toggle hidden" aria-expanded="false">Mostra tutti i tag</button>
+  </div>`;
+}
+
+function setupDetailTags(root) {
+  const container = root.querySelector("[data-detail-tags]");
+  if (!container) return;
+  const list = container.querySelector(".detail-tag-list");
+  const button = container.querySelector(".detail-tags-toggle");
+  const updateToggleVisibility = () => {
+    button.classList.toggle(
+      "hidden",
+      !list.classList.contains("expanded") && list.scrollHeight <= list.clientHeight
+    );
+  };
+  requestAnimationFrame(updateToggleVisibility);
+  if ("ResizeObserver" in window) new ResizeObserver(updateToggleVisibility).observe(list);
+  button.addEventListener("click", () => {
+    const expanded = list.classList.toggle("expanded");
+    button.setAttribute("aria-expanded", String(expanded));
+    button.textContent = expanded ? "Mostra meno" : "Mostra tutti i tag";
+    updateToggleVisibility();
+  });
+}
+
 async function openCatalogDetails(threadId) {
   const game = state.catalog.games.find((item) => item.thread_id === threadId);
   if (!game) return;
@@ -373,8 +431,8 @@ async function openCatalogDetails(threadId) {
     const metadataBadges = [
       details.game_status ? `<span class="metadata-badge status-${statusTone(details.game_status)}">${escapeHtml(details.game_status)}</span>` : "",
       details.engine ? `<span class="metadata-badge engine-badge">${escapeHtml(details.engine)}</span>` : "",
-      ...(details.tags || []).map((tag) => `<span class="metadata-badge">${escapeHtml(tag)}</span>`),
     ].filter(Boolean).join("");
+    const detailTags = renderDetailTags(details.tags || []);
     const rating = Number(game.rating);
     content.innerHTML = `
       <header class="detail-page-header">
@@ -387,6 +445,7 @@ async function openCatalogDetails(threadId) {
           <div class="detail-top"><div><p class="eyebrow">DETTAGLI DEL GIOCO</p><h1 class="detail-title">${escapeHtml(details.title || game.title)}</h1>
           <p class="detail-developer">${escapeHtml(details.developer || game.creator || "Sviluppatore non indicato")}</p></div></div>
           ${metadataBadges ? `<div class="detail-meta">${metadataBadges}</div>` : ""}
+          ${detailTags}
           <div class="thread-stats">
             <span class="thread-stat rating-stat">★ ${rating > 0 ? rating.toFixed(1) : "-"}</span>
             <span class="thread-stat like-stat">♥ ${compactCount(game.likes)} like</span>
@@ -409,6 +468,7 @@ async function openCatalogDetails(threadId) {
             : `<button type="button" class="button button-primary catalog-detail-add" data-thread-url="${escapeHtml(game.thread_url)}">＋ Aggiungi alla libreria</button>`}
         </div>
       </main>`;
+    setupDetailTags(content);
     document.querySelector("#catalog-detail-back").addEventListener("click", () => detailModal.close());
     document.querySelector(".catalog-detail-add")?.addEventListener("click", async (event) => {
       const button = event.currentTarget;
@@ -864,9 +924,46 @@ function openAddModal() {
 
 async function openSettings() {
   document.querySelector("#auth-error").classList.add("hidden");
+  document.querySelector("#settings-error").classList.add("hidden");
   document.querySelector("#settings-login-form").reset();
   settingsModal.showModal();
-  await refreshAuthStatus();
+  await Promise.all([refreshAuthStatus(), loadAppSettings()]);
+}
+
+function applyTheme(theme, persist = false) {
+  const selectedTheme = theme === "light" ? "light" : "dark";
+  document.documentElement.dataset.theme = selectedTheme;
+  document.querySelector('meta[name="theme-color"]').content = selectedTheme === "light" ? "#f5f5f8" : "#101115";
+  if (persist) localStorage.setItem(THEME_STORAGE_KEY, selectedTheme);
+  return selectedTheme;
+}
+
+function initializeTheme() {
+  let savedTheme = "dark";
+  try {
+    savedTheme = localStorage.getItem(THEME_STORAGE_KEY) || "dark";
+  } catch {
+    savedTheme = "dark";
+  }
+  const theme = applyTheme(savedTheme);
+  document.querySelector("#theme-select").value = theme;
+}
+
+async function loadAppSettings() {
+  const settings = await api("/api/settings");
+  document.querySelector("#sync-mode").value = settings.sync_mode;
+  document.querySelector("#sync-interval").value = settings.sync_interval;
+  updateSyncIntervalInput();
+}
+
+function updateSyncIntervalInput() {
+  const mode = document.querySelector("#sync-mode").value;
+  document.querySelector("#sync-interval-group").classList.toggle("hidden", mode === "manual");
+  document.querySelector("#sync-interval-unit").textContent = {
+    hours: "ore",
+    days: "giorni",
+    months: "mesi",
+  }[mode] || "";
 }
 
 async function refreshAuthStatus() {
@@ -889,7 +986,7 @@ function renderDetail(game) {
   const cover = game.image_url
     ? `<img class="detail-cover" src="${escapeHtml(imageSource(game.image_url))}" alt="" onerror="this.remove()">`
     : "";
-  const tags = (game.tags || []).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("");
+  const detailTags = renderDetailTags(game.tags || []);
   const gallery = (game.gallery || [])
     .filter((image) => image !== game.image_url)
     .map((image) => `<img src="${escapeHtml(imageSource(image))}" alt="" loading="lazy" onerror="this.remove()">`)
@@ -915,9 +1012,9 @@ function renderDetail(game) {
         ${game.game_status ? `<span class="metadata-badge status-${statusTone(game.game_status)}">${escapeHtml(game.game_status)}</span>` : ""}
         ${game.engine ? `<span class="metadata-badge engine-badge">${escapeHtml(game.engine)}</span>` : ""}
         <span class="metadata-badge library-badge">${escapeHtml(gameStatusLabel(game.personal_status))}</span>
-        ${tags}
         ${game.update_available ? "<span>Nuovo aggiornamento rilevato</span>" : ""}
       </div>
+      ${detailTags}
       <div class="thread-stats">
         <span class="thread-stat rating-stat" title="Valutazione F95Zone">${escapeHtml(ratingText(game.f95_rating))}</span>
         <span class="thread-stat like-stat">♥ ${compactCount(game.likes)} like</span>
@@ -960,6 +1057,7 @@ function renderDetail(game) {
       </div>
       </div>
     </main>`;
+  setupDetailTags(document.querySelector("#detail-content"));
   document.querySelector("#detail-close").addEventListener("click", () => detailModal.close());
   document.querySelector("#detail-sync").addEventListener("click", () => queueSync(game.id));
   document.querySelector("#edit-metadata").addEventListener("click", () => openMetadataEditor(game));
@@ -1144,6 +1242,48 @@ document.querySelector("#empty-add-button").addEventListener("click", openAddMod
 document.querySelector("#settings-button").addEventListener("click", () => {
   openSettings().catch((error) => showNotice(error.message, true));
 });
+document.querySelector("#theme-select").addEventListener("change", (event) => {
+  const errorElement = document.querySelector("#settings-error");
+  try {
+    event.currentTarget.value = applyTheme(event.currentTarget.value, true);
+    errorElement.classList.add("hidden");
+  } catch (error) {
+    errorElement.textContent = `Impossibile salvare il tema in questo browser: ${error.message}`;
+    errorElement.classList.remove("hidden");
+  }
+});
+document.querySelector("#sync-mode").addEventListener("change", updateSyncIntervalInput);
+document.querySelector("#save-settings").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  const errorElement = document.querySelector("#settings-error");
+  const intervalInput = document.querySelector("#sync-interval");
+  const settings = {
+    sync_mode: document.querySelector("#sync-mode").value,
+    sync_interval: Number(intervalInput.value),
+  };
+  errorElement.classList.add("hidden");
+  if (settings.sync_mode !== "manual" && (!Number.isInteger(settings.sync_interval) || settings.sync_interval < 1 || settings.sync_interval > 9999)) {
+    errorElement.textContent = "Inserisci un intervallo compreso tra 1 e 9999.";
+    errorElement.classList.remove("hidden");
+    return;
+  }
+  button.disabled = true;
+  try {
+    const savedSettings = await api("/api/settings", {
+      method: "POST",
+      body: JSON.stringify(settings),
+    });
+    document.querySelector("#sync-mode").value = savedSettings.sync_mode;
+    intervalInput.value = savedSettings.sync_interval;
+    updateSyncIntervalInput();
+    showNotice("Impostazioni salvate.");
+  } catch (error) {
+    errorElement.textContent = error.message;
+    errorElement.classList.remove("hidden");
+  } finally {
+    button.disabled = false;
+  }
+});
 document.querySelector("#sync-button").addEventListener("click", () => queueSync());
 document.querySelector("#filters-button").addEventListener("click", () => {
   openFilters().catch((error) => showNotice(error.message, true));
@@ -1194,16 +1334,18 @@ document.querySelector("#filters-modal").addEventListener("click", (event) => {
 document.querySelector("#sort-select").addEventListener("change", (event) => {
   state.sort = event.currentTarget.value;
   state.direction = state.sort === "name" ? "asc" : "desc";
+  saveLibrarySort();
   renderSortDirection();
   loadGames().catch((error) => showNotice(error.message, true));
 });
 document.querySelector("#sort-direction").addEventListener("click", () => {
   state.direction = state.direction === "asc" ? "desc" : "asc";
+  saveLibrarySort();
   renderSortDirection();
   loadGames().catch((error) => showNotice(error.message, true));
 });
 document.querySelectorAll(".close-modal").forEach((button) => button.addEventListener("click", () => addModal.close()));
-document.querySelectorAll(".close-settings").forEach((button) => button.addEventListener("click", () => settingsModal.close()));
+document.querySelector("#settings-back").addEventListener("click", () => settingsModal.close());
 document.querySelectorAll(".close-metadata").forEach((button) => button.addEventListener("click", () => metadataModal.close()));
 document.querySelector("#settings-login-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -1445,6 +1587,8 @@ detailModal.addEventListener("click", (event) => {
   if (event.target === detailModal) detailModal.close();
 });
 
+initializeTheme();
+restoreLibrarySort();
 loadGames().catch((error) => showNotice(error.message, true));
 api("/api/filters")
   .then((options) => populateQuickStatus(options.game_statuses))
