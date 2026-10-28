@@ -5,4 +5,4 @@ services:
       DEV_MODE: "1"
     volumes:
       - .:/app:ro
-      - f95-library-data:/data
+      - f95-library_data:/data
