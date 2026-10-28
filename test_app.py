@@ -804,7 +804,11 @@ class SyncTests(unittest.TestCase):
             "tags": ["Adventure"],
             "thread_updated_at": None,
         }
-        with patch.object(app, "fetch_thread_metadata", return_value=metadata):
+        image_bytes = b"cached image bytes"
+        with (
+            patch.object(app, "fetch_thread_metadata", return_value=metadata),
+            patch.object(app, "fetch_f95_image", return_value=(image_bytes, "image/jpeg")) as fetch_image,
+        ):
             game = app.sync_game(1)
 
         self.assertEqual(game["gallery"], metadata["gallery"])
@@ -813,18 +817,55 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(game["latest_version"], "1.0")
         self.assertEqual(game["user_version"], "0.7")
         self.assertEqual(game["f95_rating"], None)
+        fetch_image.assert_called_once_with(metadata["image_url"])
+        cached_cover = app.get_cached_f95_image(metadata["image_url"])
+        self.assertEqual(cached_cover, (image_bytes, "image/jpeg"))
+        self.assertEqual(game["image_cache_errors"], [])
         updated_metadata = {**metadata, "gallery": ["https://attachments.f95zone.to/new-shot.jpg"]}
         updated_metadata["version"] = "1.1"
         updated_metadata["likes"] = 24
         updated_metadata["views"] = 1200
         updated_metadata["f95_rating"] = 4.5
-        with patch.object(app, "fetch_thread_metadata", return_value=updated_metadata):
+        with (
+            patch.object(app, "fetch_thread_metadata", return_value=updated_metadata),
+            patch.object(app, "fetch_f95_image", return_value=(image_bytes, "image/jpeg")) as fetch_image,
+        ):
             game = app.sync_game(1)
         self.assertEqual(game["gallery"], updated_metadata["gallery"])
         self.assertEqual(game["latest_version"], "1.1")
         self.assertEqual(game["likes"], 24)
         self.assertEqual(game["views"], 1200)
         self.assertEqual(game["f95_rating"], 4.5)
+        fetch_image.assert_called_once_with("https://attachments.f95zone.to/new-shot.jpg")
+        self.assertIsNotNone(app.get_cached_f95_image("https://attachments.f95zone.to/new-shot.jpg"))
+
+        updated_metadata = {**updated_metadata, "gallery": []}
+        with patch.object(app, "fetch_thread_metadata", return_value=updated_metadata):
+            app.sync_game(1)
+        self.assertIsNone(app.get_cached_f95_image("https://attachments.f95zone.to/new-shot.jpg"))
+
+    def test_image_download_failure_is_visible_without_discarding_metadata(self):
+        metadata = {
+            "title": "Test",
+            "image_url": "https://attachments.f95zone.to/cover.jpg",
+            "gallery": ["https://attachments.f95zone.to/cover.jpg"],
+            "description": "Description",
+            "developer": "",
+            "version": "1.0",
+            "engine": "",
+            "game_status": "Ongoing",
+            "tags": [],
+            "thread_updated_at": None,
+        }
+        with (
+            patch.object(app, "fetch_thread_metadata", return_value=metadata),
+            patch.object(app, "fetch_f95_image", side_effect=ValueError("CDN non disponibile")),
+        ):
+            game = app.sync_game(1)
+
+        self.assertEqual(game["latest_version"], "1.0")
+        self.assertEqual(game["last_error"], "")
+        self.assertEqual(game["image_cache_errors"], ["CDN non disponibile"])
 
     def test_sync_reports_version_and_completion_status_changes(self):
         with app.database() as db:

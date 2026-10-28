@@ -1139,6 +1139,9 @@ function renderDetail(game) {
         <span class="thread-stat">◉ ${compactCount(game.views)} visualizzazioni</span>
       </div>
       ${game.last_error ? `<div class="detail-error">${escapeHtml(game.last_error)}</div>` : ""}
+      ${game.image_cache_errors?.length
+        ? `<div class="detail-error">Non è stato possibile scaricare ${game.image_cache_errors.length === 1 ? "un'immagine" : `${game.image_cache_errors.length} immagini`} per l'archivio locale. Verranno ritentate al prossimo aggiornamento.</div>`
+        : ""}
       <section class="detail-section">
         <h3>OVERVIEW</h3>
         <p class="detail-description">${escapeHtml(game.description || "Overview non disponibile nel primo post.")}</p>

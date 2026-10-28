@@ -1452,6 +1452,127 @@ def fetch_f95_image(image_url):
             raise ValueError(f"Impossibile raggiungere il CDN immagini F95Zone: {reason}.") from exc
 
 
+def image_cache_directory():
+    return DB_PATH.parent / "images"
+
+
+def image_cache_filename(image_url):
+    digest = hashlib.sha256(image_url.encode("utf-8")).hexdigest()
+    return digest
+
+
+def cache_thread_images(metadata):
+    image_urls = list(dict.fromkeys(
+        url for url in [metadata.get("image_url", ""), *(metadata.get("gallery") or [])]
+        if isinstance(url, str) and url
+    ))
+    errors = []
+    image_cache_directory().mkdir(parents=True, exist_ok=True)
+    for image_url in image_urls:
+        filename = image_cache_filename(image_url)
+        with database() as db:
+            cached = db.execute(
+                "SELECT filename FROM image_cache WHERE source_url = ?",
+                (image_url,),
+            ).fetchone()
+        if cached and (image_cache_directory() / cached["filename"]).is_file():
+            continue
+        try:
+            content, content_type = fetch_f95_image(image_url)
+            path = image_cache_directory() / filename
+            temporary_path = image_cache_directory() / f"{filename}.tmp"
+            temporary_path.write_bytes(content)
+            temporary_path.chmod(0o600)
+            temporary_path.replace(path)
+            with database() as db:
+                db.execute(
+                    """
+                    INSERT INTO image_cache (source_url, filename, content_type, updated_at, last_error)
+                    VALUES (?, ?, ?, ?, '')
+                    ON CONFLICT(source_url) DO UPDATE SET
+                        filename = excluded.filename,
+                        content_type = excluded.content_type,
+                        updated_at = excluded.updated_at,
+                        last_error = ''
+                    """,
+                    (image_url, filename, content_type, now_iso()),
+                )
+        except (ValueError, OSError) as exc:
+            error = str(exc)
+            errors.append(error)
+            with database() as db:
+                db.execute(
+                    """
+                    INSERT INTO image_cache (source_url, filename, content_type, updated_at, last_error)
+                    VALUES (?, ?, '', ?, ?)
+                    ON CONFLICT(source_url) DO UPDATE SET
+                        last_error = excluded.last_error,
+                        updated_at = excluded.updated_at
+                    """,
+                    (image_url, filename, now_iso(), error[:500]),
+                )
+            print(f"Impossibile memorizzare l'immagine F95Zone {image_url}: {error}", flush=True)
+    return errors
+
+
+def get_cached_f95_image(image_url):
+    with database() as db:
+        cached = db.execute(
+            "SELECT filename, content_type FROM image_cache WHERE source_url = ? AND last_error = ''",
+            (image_url,),
+        ).fetchone()
+    if not cached:
+        return None
+    path = image_cache_directory() / cached["filename"]
+    try:
+        return path.read_bytes(), cached["content_type"]
+    except FileNotFoundError:
+        return None
+
+
+def prune_image_cache():
+    referenced_urls = set()
+    with database() as db:
+        rows = db.execute("SELECT image_url, gallery FROM games").fetchall()
+        cache_rows = db.execute("SELECT source_url, filename FROM image_cache").fetchall()
+    for row in rows:
+        if row["image_url"]:
+            referenced_urls.add(row["image_url"])
+        try:
+            gallery = json.loads(row["gallery"])
+        except (TypeError, json.JSONDecodeError):
+            gallery = []
+        if isinstance(gallery, list):
+            referenced_urls.update(url for url in gallery if isinstance(url, str) and url)
+    stale_rows = [row for row in cache_rows if row["source_url"] not in referenced_urls]
+    if not stale_rows:
+        return
+    with database() as db:
+        db.executemany("DELETE FROM image_cache WHERE source_url = ?", [
+            (row["source_url"],) for row in stale_rows
+        ])
+    for row in stale_rows:
+        try:
+            (image_cache_directory() / row["filename"]).unlink(missing_ok=True)
+        except OSError as exc:
+            print(f"Impossibile rimuovere l'immagine non più usata {row['filename']}: {exc}", flush=True)
+
+
+def get_image_cache_errors(image_urls):
+    image_urls = list(dict.fromkeys(url for url in image_urls if url))
+    if not image_urls:
+        return []
+    with database() as db:
+        rows = db.execute(
+            f"""
+            SELECT last_error FROM image_cache
+            WHERE source_url IN ({','.join('?' for _ in image_urls)}) AND last_error != ''
+            """,
+            image_urls,
+        ).fetchall()
+    return [row["last_error"] for row in rows]
+
+
 def login_f95zone(username, password):
     if not isinstance(username, str) or not username.strip() or len(username) > 120:
         raise ValueError("Inserisci un nome utente F95Zone valido.")
@@ -1608,6 +1729,17 @@ def initialize_db():
             """
         )
         db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS image_cache (
+                source_url TEXT PRIMARY KEY,
+                filename TEXT NOT NULL,
+                content_type TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                last_error TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        db.execute(
             "INSERT OR IGNORE INTO settings (key, value) VALUES ('sync_mode', ?)",
             (DEFAULT_SYNC_MODE,),
         )
@@ -1663,7 +1795,13 @@ def game_to_dict(row):
 def get_game(game_id):
     with database() as db:
         row = db.execute("SELECT * FROM games WHERE id = ?", (game_id,)).fetchone()
-    return game_to_dict(row) if row else None
+    if not row:
+        return None
+    game = game_to_dict(row)
+    game["image_cache_errors"] = get_image_cache_errors(
+        [game["image_url"], *game["gallery"]]
+    )
+    return game
 
 
 def delete_games(game_ids):
@@ -1697,6 +1835,7 @@ def delete_games(game_ids):
         SYNC_PENDING_CHANGES[:] = [
             game for game in SYNC_PENDING_CHANGES if game["id"] not in existing_ids
         ]
+    prune_image_cache()
     return len(game_ids)
 
 
@@ -1806,6 +1945,7 @@ def sync_game(game_id):
             return None
         try:
             metadata = fetch_thread_metadata(game["thread_url"])
+            cache_thread_images(metadata)
             old_timestamp = game["thread_updated_at"]
             new_timestamp = metadata["thread_updated_at"]
             is_newer = bool(new_timestamp and old_timestamp and new_timestamp > old_timestamp)
@@ -1842,6 +1982,7 @@ def sync_game(game_id):
                         new_timestamp, now_iso(), int(is_newer), now_iso(), game_id,
                     ),
                 )
+            prune_image_cache()
         except ValueError as exc:
             with database() as db:
                 db.execute(
@@ -2160,11 +2301,15 @@ class LibraryHandler(SimpleHTTPRequestHandler):
         parts = urlsplit(self.path)
         if parts.path == "/api/image":
             image_url = parse_qs(parts.query).get("url", [""])[0]
-            try:
-                content, content_type = fetch_f95_image(image_url)
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, 400)
-                return
+            cached_image = get_cached_f95_image(image_url)
+            if cached_image:
+                content, content_type = cached_image
+            else:
+                try:
+                    content, content_type = fetch_f95_image(image_url)
+                except ValueError as exc:
+                    self.send_json({"error": str(exc)}, 400)
+                    return
             body = content
             self.send_response(200)
             self.send_header("Content-Type", content_type)
