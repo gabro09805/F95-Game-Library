@@ -1672,23 +1672,31 @@ def delete_games(game_ids):
     if any(isinstance(game_id, bool) or not isinstance(game_id, int) or game_id < 1 for game_id in game_ids):
         raise ValueError("La selezione dei giochi non è valida.")
     game_ids = list(dict.fromkeys(game_ids))
-    with database() as db:
-        existing_ids = set()
-        for start in range(0, len(game_ids), 500):
-            batch = game_ids[start:start + 500]
-            placeholders = ",".join("?" for _ in batch)
-            existing_ids.update(
-                row["id"] for row in db.execute(
-                    f"SELECT id FROM games WHERE id IN ({placeholders})",
-                    batch,
-                ).fetchall()
-            )
-        if len(existing_ids) != len(game_ids):
-            raise ValueError("Uno o più giochi selezionati non sono più presenti nella libreria.")
-        for start in range(0, len(game_ids), 500):
-            batch = game_ids[start:start + 500]
-            placeholders = ",".join("?" for _ in batch)
-            db.execute(f"DELETE FROM games WHERE id IN ({placeholders})", batch)
+    with SYNC_PROGRESS_LOCK:
+        with database() as db:
+            existing_ids = set()
+            for start in range(0, len(game_ids), 500):
+                batch = game_ids[start:start + 500]
+                placeholders = ",".join("?" for _ in batch)
+                existing_ids.update(
+                    row["id"] for row in db.execute(
+                        f"SELECT id FROM games WHERE id IN ({placeholders})",
+                        batch,
+                    ).fetchall()
+                )
+            if len(existing_ids) != len(game_ids):
+                raise ValueError("Uno o più giochi selezionati non sono più presenti nella libreria.")
+            for start in range(0, len(game_ids), 500):
+                batch = game_ids[start:start + 500]
+                placeholders = ",".join("?" for _ in batch)
+                db.execute(f"DELETE FROM games WHERE id IN ({placeholders})", batch)
+        queued_before = len(SYNC_QUEUE)
+        SYNC_QUEUE[:] = [game_id for game_id in SYNC_QUEUE if game_id not in existing_ids]
+        SYNC_PROGRESS["total"] -= queued_before - len(SYNC_QUEUE)
+        SYNC_REPORT_GAME_IDS.difference_update(existing_ids)
+        SYNC_PENDING_CHANGES[:] = [
+            game for game in SYNC_PENDING_CHANGES if game["id"] not in existing_ids
+        ]
     return len(game_ids)
 
 
@@ -2366,9 +2374,12 @@ class LibraryHandler(SimpleHTTPRequestHandler):
         if not match:
             self.send_json({"error": "Endpoint non trovato."}, 404)
             return
-        with database() as db:
-            cursor = db.execute("DELETE FROM games WHERE id = ?", (int(match.group(1)),))
-        self.send_json({"deleted": cursor.rowcount == 1}, 200 if cursor.rowcount else 404)
+        try:
+            deleted = delete_games([int(match.group(1))])
+        except ValueError:
+            self.send_json({"error": "Gioco non trovato."}, 404)
+            return
+        self.send_json({"deleted": deleted == 1})
 
 
 def main():

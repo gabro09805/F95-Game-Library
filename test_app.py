@@ -677,6 +677,92 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(completed["completed"], 1)
         self.assertEqual(completed["total"], 1)
 
+    def test_sync_queue_processes_rapid_additions_sequentially(self):
+        started = threading.Event()
+        continue_sync = threading.Event()
+        synced_ids = []
+        with app.database() as db:
+            db.execute(
+                "INSERT INTO games (thread_url, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                ("https://f95zone.to/threads/second.456/", "Second", app.now_iso(), app.now_iso()),
+            )
+
+        def fake_sync(game_id):
+            synced_ids.append(game_id)
+            if game_id == 1:
+                started.set()
+                continue_sync.wait(2)
+            return app.get_game(game_id)
+
+        with patch.object(app, "sync_game", side_effect=fake_sync):
+            app.queue_sync_jobs([1], report_changes=False)
+            self.assertTrue(started.wait(1))
+            progress = app.queue_sync_jobs([2], report_changes=False)
+            self.assertEqual(progress["total"], 2)
+            continue_sync.set()
+            for _ in range(100):
+                if not app.get_sync_progress()["active"]:
+                    break
+                threading.Event().wait(0.01)
+
+        self.assertEqual(synced_ids, [1, 2])
+        self.assertFalse(app.get_sync_progress()["active"])
+
+    def test_removing_game_cancels_its_queued_import_without_waiting(self):
+        started = threading.Event()
+        continue_sync = threading.Event()
+        synced_ids = []
+        with app.database() as db:
+            db.execute(
+                "INSERT INTO games (thread_url, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                ("https://f95zone.to/threads/second.456/", "Second", app.now_iso(), app.now_iso()),
+            )
+
+        def fake_sync(game_id):
+            synced_ids.append(game_id)
+            if game_id == 1:
+                started.set()
+                continue_sync.wait(2)
+            return app.get_game(game_id)
+
+        with patch.object(app, "sync_game", side_effect=fake_sync):
+            app.queue_sync_jobs([1], report_changes=False)
+            self.assertTrue(started.wait(1))
+            app.queue_sync_jobs([2], report_changes=False)
+            self.assertEqual(app.delete_games([2]), 1)
+            self.assertNotIn(2, app.SYNC_QUEUE)
+            continue_sync.set()
+            for _ in range(100):
+                if not app.get_sync_progress()["active"]:
+                    break
+                threading.Event().wait(0.01)
+
+        self.assertEqual(synced_ids, [1])
+        self.assertIsNone(app.get_game(2))
+        self.assertFalse(app.get_sync_progress()["active"])
+
+    def test_removing_game_does_not_wait_for_its_active_import(self):
+        started = threading.Event()
+        continue_sync = threading.Event()
+
+        def fake_sync(game_id):
+            started.set()
+            continue_sync.wait(2)
+            return app.get_game(game_id)
+
+        with patch.object(app, "sync_game", side_effect=fake_sync):
+            app.queue_sync_jobs([1], report_changes=False)
+            self.assertTrue(started.wait(1))
+            self.assertEqual(app.delete_games([1]), 1)
+            self.assertIsNone(app.get_game(1))
+            continue_sync.set()
+            for _ in range(100):
+                if not app.get_sync_progress()["active"]:
+                    break
+                threading.Event().wait(0.01)
+
+        self.assertFalse(app.get_sync_progress()["active"])
+
     def test_user_version_date_changes_only_when_user_version_changes(self):
         with patch.object(app, "now_iso", return_value="2026-10-28T10:00:00+00:00"):
             updated = app.update_game_fields(1, {"user_version": "0.8"})

@@ -43,6 +43,7 @@ Per i dettagli degli aggiornamenti e gli eventuali contenuti completi, apri il t
 
 - Database SQLite nel volume `/data`.
 - Importazione tramite URL del thread.
+- Quando un gioco viene aggiunto, l'importazione completa dei metadati parte in background; più giochi aggiunti rapidamente vengono elaborati in coda, uno alla volta. Un gioco rimosso mentre è in attesa viene tolto anche dalla coda, mentre la rimozione resta disponibile durante un'importazione già avviata.
 - Copertina, galleria e overview vengono estratte dal primo post del thread. L'overview si interrompe prima dei campi metadata successivi (come "Thread Updated"). Le immagini ospitate sui domini F95Zone passano da un proxy locale che invia il Referer richiesto e limita host, tipo e dimensione della risposta.
 - Stato ed engine vengono mostrati come etichette colorate. La versione rilevata da F95Zone resta distinta dalla versione personale, che si può scrivere a mano o copiare con un pulsante dalla versione più recente.
 - La scheda mostra le stelle personali e, quando presenti nella pagina, la valutazione F95Zone, i like e le visualizzazioni. Il pulsante **Modifica metadati** apre un editor separato.
