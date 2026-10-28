@@ -61,6 +61,7 @@ const addModal = document.querySelector("#add-modal");
 const settingsModal = document.querySelector("#settings-modal");
 const detailModal = document.querySelector("#detail-modal");
 const metadataModal = document.querySelector("#metadata-modal");
+const deleteConfirmModal = document.querySelector("#delete-confirm-modal");
 const filtersModal = document.querySelector("#filters-modal");
 const catalogFiltersModal = document.querySelector("#catalog-filters-modal");
 const THEME_STORAGE_KEY = "f95-library-theme";
@@ -995,6 +996,7 @@ function renderDetail(game) {
     <header class="detail-page-header">
       <button class="button button-quiet" id="detail-close">← Libreria</button>
       <div class="detail-tools">
+        <a class="button button-quiet" href="${escapeHtml(game.thread_url)}" target="_blank" rel="noopener noreferrer">Apri thread su F95Zone ↗</a>
         <button class="button button-quiet" id="edit-metadata">Modifica metadati</button>
         <div class="sync-control detail-sync-control">
           <button class="icon-button" id="detail-sync" title="Controlla aggiornamenti">⟳</button>
@@ -1050,7 +1052,6 @@ function renderDetail(game) {
         <select id="detail-status" aria-label="Stato del gioco">
           ${Object.entries(statusNames).filter(([key]) => key !== "all").map(([key, label]) => `<option value="${key}" ${game.personal_status === key ? "selected" : ""}>${label}</option>`).join("")}
         </select>
-        <a href="${escapeHtml(game.thread_url)}" target="_blank" rel="noopener noreferrer">Apri thread su F95Zone ↗</a>
         ${game.update_available ? '<button class="button button-quiet" id="mark-update-seen">Segna update come visto</button>' : ""}
         <button class="button button-primary" id="save-detail">Salva commenti e versione</button>
         <button class="button button-quiet" id="delete-game">Rimuovi</button>
@@ -1157,7 +1158,13 @@ async function markUpdateSeen(id) {
 }
 
 async function deleteGame(id) {
-  if (!window.confirm("Rimuovere questo gioco dalla libreria? Le note salvate verranno eliminate.")) return;
+  document.querySelector("#delete-confirm-title").textContent = `Rimuovere ${state.activeGame?.title || "questo gioco"}?`;
+  deleteConfirmModal.returnValue = "";
+  deleteConfirmModal.showModal();
+  await new Promise((resolve) => {
+    deleteConfirmModal.addEventListener("close", resolve, { once: true });
+  });
+  if (deleteConfirmModal.returnValue !== "delete") return;
   try {
     await api(`/api/games/${id}`, { method: "DELETE" });
     detailModal.close();

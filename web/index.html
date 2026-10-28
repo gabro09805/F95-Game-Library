@@ -368,6 +368,19 @@
       </form>
     </dialog>
 
+    <dialog class="modal confirm-modal" id="delete-confirm-modal" aria-labelledby="delete-confirm-title" aria-describedby="delete-confirm-message">
+      <form method="dialog" id="delete-confirm-form">
+        <div class="confirm-icon" aria-hidden="true">!</div>
+        <p class="eyebrow">RIMOZIONE GIOCO</p>
+        <h2 id="delete-confirm-title">Rimuovere questo gioco?</h2>
+        <p id="delete-confirm-message">Il gioco e le relative note personali verranno eliminati dalla libreria. L'azione non può essere annullata.</p>
+        <div class="modal-actions">
+          <button type="submit" class="button button-quiet" value="cancel">Annulla</button>
+          <button type="submit" class="button button-danger" value="delete">Rimuovi gioco</button>
+        </div>
+      </form>
+    </dialog>
+
     <dialog class="modal detail-modal" id="detail-modal">
       <div id="detail-content"></div>
     </dialog>
