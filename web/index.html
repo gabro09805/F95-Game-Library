@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#101115">
+    <title>F95 Library</title>
+    <link rel="stylesheet" href="/style.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="/" aria-label="F95 Library home">
+          <span class="brand-mark">F</span>
+          <span>F95<span class="brand-light">Library</span></span>
+        </a>
+        <div class="side-label">LIBRERIA</div>
+        <nav class="status-nav" aria-label="Filtra per stato">
+          <button class="nav-item active" data-status="all"><span class="nav-icon">▦</span>Tutti i giochi<span class="nav-count" id="count-all">0</span></button>
+          <button class="nav-item" data-status="playing"><span class="nav-icon">▶</span>In corso</button>
+          <button class="nav-item" data-status="wishlist"><span class="nav-icon">♡</span>Da giocare</button>
+          <button class="nav-item" data-status="completed"><span class="nav-icon">✓</span>Completati</button>
+          <button class="nav-item" data-status="on_hold"><span class="nav-icon">Ⅱ</span>In pausa</button>
+          <button class="nav-item" data-status="dropped"><span class="nav-icon">×</span>Abbandonati</button>
+        </nav>
+        <div class="side-label catalog-side-label">ESPLORA</div>
+        <button type="button" class="nav-item catalog-nav-item" id="catalog-nav-button" aria-label="Apri catalogo F95Zone">
+          <span class="nav-icon">⌕</span>Catalogo F95Zone
+        </button>
+        <div class="sidebar-bottom">
+          <div class="connection"><span class="pulse"></span><span>Archivio locale</span></div>
+          <p>Metadati sincronizzati da F95Zone</p>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <div class="breadcrumbs">La tua libreria <span>/</span> <strong id="current-filter">Tutti i giochi</strong></div>
+          <div class="top-actions">
+            <button class="icon-button" id="settings-button" title="Impostazioni" aria-label="Impostazioni">⚙</button>
+            <div class="sync-control" id="library-sync-control">
+              <button class="icon-button" id="sync-button" title="Controlla aggiornamenti" aria-label="Controlla aggiornamenti">⟳</button>
+              <span class="sync-progress" id="sync-progress" aria-live="polite">0/0</span>
+            </div>
+            <button class="button button-primary" id="add-button"><span>＋</span> Aggiungi gioco</button>
+          </div>
+        </header>
+
+        <div id="library-view">
+        <section class="page-heading">
+          <div>
+            <p class="eyebrow">IL TUO SPAZIO PERSONALE</p>
+            <h1 id="page-title">La tua libreria</h1>
+            <p class="subtitle">Tieni traccia dei giochi che segui su F95Zone.</p>
+          </div>
+          <div class="stats-card"><span class="stats-icon">◈</span><div><strong id="game-count">0</strong><small>GIOCHI IN LIBRERIA</small></div></div>
+        </section>
+
+        <section class="toolbar">
+          <div class="search-tools">
+            <label class="search-box">
+              <span>⌕</span>
+              <input id="search-input" type="search" placeholder="Cerca per titolo, sviluppatore o tag..." autocomplete="off">
+              <kbd>⌘ K</kbd>
+            </label>
+            <label class="quick-filter">
+              <span>STATO</span>
+              <select id="quick-f95-status" aria-label="Filtra per stato">
+                <option value="">Tutti gli stati</option>
+              </select>
+            </label>
+            <button type="button" class="button button-quiet filters-button" id="filters-button">
+              Filtri <span class="filter-count hidden" id="filter-count">0</span>
+            </button>
+          </div>
+          <div class="sort-controls">
+            <label for="sort-select">ORDINA PER</label>
+            <select id="sort-select" aria-label="Ordina i giochi">
+              <option value="name">Nome</option>
+              <option value="updated">Data aggiornamento ultima versione</option>
+              <option value="added">Data inserimento</option>
+              <option value="rating">Valutazione</option>
+              <option value="likes">Mi piace</option>
+              <option value="views">Visualizzazioni</option>
+            </select>
+            <button type="button" class="sort-direction" id="sort-direction" aria-label="Inverti ordine" title="Inverti ordine">↑</button>
+            <span class="sort-order-label" id="sort-order-label">A–Z</span>
+          </div>
+        </section>
+
+        <dialog class="modal catalog-filters-modal library-filters-modal" id="filters-modal">
+          <form id="filters-form">
+            <div class="modal-heading">
+              <div><p class="eyebrow">FILTRA LA LIBRERIA</p><h2>Filtri</h2></div>
+              <button type="button" class="icon-button" id="close-filters" aria-label="Chiudi">×</button>
+            </div>
+            <section class="filter-summary">
+              <h3>Filtri selezionati</h3>
+              <div id="filter-summary-list" class="filter-summary-list"><span class="filter-summary-empty">Nessun filtro selezionato</span></div>
+            </section>
+            <div class="catalog-filter-heading">
+              <span id="library-filter-counts">Filtri basati sui giochi presenti nella libreria</span>
+            </div>
+            <section class="catalog-prefix-group library-filter-groups">
+              <details open data-library-filter-category="game_statuses">
+                <summary>STATO <span id="library-game-status-count"></span></summary>
+                <input id="library-game-status-search" type="search" placeholder="Cerca uno stato..." autocomplete="off">
+                <div id="library-game-status-list" class="catalog-prefix-list"><p>Caricamento...</p></div>
+              </details>
+              <details data-library-filter-category="engines">
+                <summary>ENGINE <span id="library-engine-count"></span></summary>
+                <input id="library-engine-search" type="search" placeholder="Cerca un engine..." autocomplete="off">
+                <div id="library-engine-list" class="catalog-prefix-list"><p>Caricamento...</p></div>
+              </details>
+              <details data-library-filter-category="tags">
+                <summary>TAG <span id="library-tag-count"></span></summary>
+                <input id="filter-tag-search" type="search" placeholder="Cerca tra i tag..." autocomplete="off">
+                <div id="library-tag-list" class="catalog-prefix-list"><p>Caricamento...</p></div>
+              </details>
+              <details data-library-filter-category="personal_statuses">
+                <summary>STATO DELLA LIBRERIA <span id="library-personal-status-count"></span></summary>
+                <div id="library-personal-status-list" class="catalog-prefix-list"></div>
+              </details>
+            </section>
+            <div class="modal-actions">
+              <button type="button" class="button button-quiet" id="cancel-filters">Chiudi senza applicare</button>
+              <button type="button" class="button button-quiet" id="clear-filters">Azzera filtri</button>
+              <button type="submit" class="button button-primary">Applica filtri</button>
+            </div>
+          </form>
+        </dialog>
+
+        <div class="notice hidden" id="notice" role="status"></div>
+        <section class="game-grid" id="game-grid" aria-live="polite"></section>
+        <section class="empty-state hidden" id="empty-state">
+          <div class="empty-art">✦</div>
+          <h2>La tua libreria inizia qui</h2>
+          <p>Aggiungi il link di un thread F95Zone per salvare copertina, descrizione e aggiornamenti.</p>
+          <button class="button button-primary" id="empty-add-button">＋ Aggiungi il primo gioco</button>
+        </section>
+        </div>
+
+        <section class="catalog-view hidden" id="catalog-view">
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow">ESPLORA F95ZONE</p>
+              <h1>Catalogo</h1>
+              <p class="subtitle">Cerca giochi e aggiungili alla tua libreria senza lasciare la pagina.</p>
+            </div>
+            <div class="catalog-total"><strong id="catalog-total">0</strong><small>RISULTATI</small></div>
+          </div>
+          <section class="catalog-toolbar">
+            <label class="search-box catalog-search-box">
+              <span>⌕</span>
+              <input id="catalog-search" type="search" placeholder="Cerca per nome..." autocomplete="off">
+            </label>
+            <label class="catalog-sort">
+              <span>ORDINA PER</span>
+              <select id="catalog-sort" aria-label="Ordina catalogo">
+                <option value="date">Data</option>
+                <option value="likes">Mi piace</option>
+                <option value="views">Visualizzazioni</option>
+                <option value="title">Nome</option>
+                <option value="rating">Valutazione</option>
+              </select>
+            </label>
+            <button type="button" class="button button-quiet" id="catalog-filters-button">Filtri</button>
+            <button type="button" class="button button-quiet" id="catalog-back-button">← Libreria</button>
+          </section>
+          <div class="catalog-active-filters" id="catalog-active-filters"></div>
+          <div class="catalog-notice hidden" id="catalog-notice" role="status"></div>
+          <div class="catalog-grid" id="catalog-grid" aria-live="polite"></div>
+          <div class="catalog-pagination">
+            <button type="button" class="button button-quiet" id="catalog-prev">← Precedente</button>
+            <span id="catalog-page-label">Pagina 1 di 1</span>
+            <button type="button" class="button button-quiet" id="catalog-next">Successiva →</button>
+          </div>
+        </section>
+
+        <dialog class="modal catalog-filters-modal" id="catalog-filters-modal">
+          <form id="catalog-filters-form">
+            <div class="modal-heading">
+              <div><p class="eyebrow">CATALOGO F95ZONE</p><h2>Filtri catalogo</h2></div>
+              <button type="button" class="icon-button" id="catalog-filters-close" aria-label="Chiudi">×</button>
+            </div>
+            <section class="filter-summary">
+              <h3>Filtri selezionati</h3>
+              <div id="catalog-filter-summary" class="filter-summary-list"><span class="filter-summary-empty">Nessun filtro selezionato</span></div>
+            </section>
+            <div class="catalog-filter-heading">
+              <span id="catalog-filter-counts">Filtri SAM non ancora caricati</span>
+              <button type="button" class="button button-quiet" id="catalog-refresh-filters">Aggiorna</button>
+            </div>
+            <p class="modal-error hidden" id="catalog-filters-error" role="alert"></p>
+            <section class="catalog-filter-section">
+              <div class="catalog-filter-section-heading"><span>CATEGORIA</span><strong>GIOCHI</strong></div>
+            </section>
+            <section class="catalog-filter-section">
+              <div class="catalog-filter-section-heading"><label for="catalog-sort-modal">ORDINAMENTO</label></div>
+              <select id="catalog-sort-modal" class="catalog-filter-select">
+                <option value="date">Data</option><option value="likes">Mi piace</option>
+                <option value="views">Visualizzazioni</option><option value="title">Nome</option><option value="rating">Valutazione</option>
+              </select>
+            </section>
+            <section class="catalog-filter-section">
+              <div class="catalog-filter-section-heading"><label for="catalog-date-limit">LIMITE DATA</label><strong id="catalog-date-label">SEMPRE</strong></div>
+              <input id="catalog-date-limit" class="catalog-date-range" type="range" min="0" max="8" step="1" value="0">
+              <div class="catalog-date-ticks"><span>SEMPRE</span><span>OGGI</span></div>
+            </section>
+            <section class="catalog-filter-section">
+              <div class="catalog-filter-section-heading"><label for="catalog-filter-search">RICERCA</label>
+                <select id="catalog-search-mode" aria-label="Cerca per creatore o titolo"><option value="creator">CREATORE</option><option value="title">TITOLO</option></select>
+              </div>
+              <input id="catalog-filter-search" type="search" placeholder="Cerca giochi..." autocomplete="off">
+            </section>
+            <section class="catalog-filter-section">
+              <div class="catalog-filter-section-heading"><label for="catalog-tag-search">TAG (MAX 10)</label>
+                <select id="catalog-tag-mode" aria-label="Modalità tag"><option value="or">OR</option><option value="and">AND</option></select>
+              </div>
+              <input id="catalog-tag-search" type="search" placeholder="Seleziona un tag da filtrare..." autocomplete="off">
+              <div class="catalog-tag-picker"><select id="catalog-tag-select" aria-label="Seleziona un tag"><option value="">Caricamento tag SAM...</option></select>
+                <button type="button" data-catalog-action="include-tag" aria-label="Includi tag">+</button></div>
+              <p class="catalog-filter-limit" id="catalog-tag-limit">0/10</p>
+            </section>
+            <section class="catalog-filter-section">
+              <div class="catalog-filter-section-heading"><label for="catalog-exclude-tag-search">EXCLUDE TAGS (MAX 10)</label></div>
+              <input id="catalog-exclude-tag-search" type="search" placeholder="Seleziona un tag da escludere..." autocomplete="off">
+              <div class="catalog-tag-picker"><select id="catalog-exclude-tag-select" aria-label="Seleziona un tag da escludere"><option value="">Caricamento tag SAM...</option></select>
+                <button type="button" data-catalog-action="exclude-tag" aria-label="Escludi tag">−</button></div>
+              <p class="catalog-filter-limit" id="catalog-exclude-tag-limit">0/10</p>
+            </section>
+            <section class="catalog-filter-section">
+              <label class="catalog-checkbox" for="catalog-ignored">
+                <input id="catalog-ignored" type="checkbox">
+                <span><strong>Includi thread ignorati in SAM</strong><small>Include i giochi ignorati nel tuo account F95Zone.</small></span>
+              </label>
+            </section>
+            <section class="catalog-filter-section">
+              <div class="catalog-filter-section-heading"><label for="catalog-prefix-mode">CORRISPONDENZA PREFISSI</label></div>
+              <select id="catalog-prefix-mode" class="catalog-filter-select"><option value="and">AND</option><option value="or">OR</option></select>
+            </section>
+            <section class="catalog-prefix-group">
+              <details open>
+                <summary>PREFIX: ENGINE <span id="catalog-engine-count"></span></summary>
+                <input id="catalog-engine-search" type="search" placeholder="Cerca engine..." autocomplete="off">
+                <div id="catalog-engine-list" class="catalog-prefix-list"><p>Caricamento...</p></div>
+              </details>
+              <details>
+                <summary>PREFIX: OTHER <span id="catalog-other-count"></span></summary>
+                <input id="catalog-other-search" type="search" placeholder="Cerca altri prefissi..." autocomplete="off">
+                <div id="catalog-other-list" class="catalog-prefix-list"><p>Caricamento...</p></div>
+              </details>
+              <details>
+                <summary>PREFIX: STATUS <span id="catalog-status-count"></span></summary>
+                <input id="catalog-status-search" type="search" placeholder="Cerca stato..." autocomplete="off">
+                <div id="catalog-status-list" class="catalog-prefix-list"><p>Caricamento...</p></div>
+              </details>
+            </section>
+            <div class="modal-actions">
+              <button type="button" class="button button-quiet" id="catalog-filters-cancel">Chiudi senza applicare</button>
+              <button type="button" class="button button-quiet" id="catalog-filters-clear">Azzera filtri</button>
+              <button type="submit" class="button button-primary">Applica</button>
+            </div>
+          </form>
+        </dialog>
+      </main>
+    </div>
+
+    <dialog class="modal" id="add-modal">
+      <form id="add-form">
+        <div class="modal-heading">
+          <div><p class="eyebrow">NUOVO ELEMENTO</p><h2>Aggiungi un gioco</h2></div>
+          <button type="button" class="icon-button close-modal" aria-label="Chiudi">×</button>
+        </div>
+        <label class="field-label" for="thread-url">Link del thread F95Zone</label>
+        <input id="thread-url" name="thread_url" type="url" required placeholder="https://f95zone.to/threads/nome-gioco.12345/">
+        <p class="field-hint">La pagina verrà controllata per importare titolo, copertina e descrizione. Non vengono scaricati giochi.</p>
+        <label class="field-label" for="initial-notes">Nota personale <span>(facoltativa)</span></label>
+        <textarea id="initial-notes" name="notes" rows="3" placeholder="Aggiungi una nota..."></textarea>
+        <div class="modal-error hidden" id="form-error"></div>
+        <div class="modal-actions"><button type="button" class="button button-quiet close-modal">Annulla</button><button type="submit" class="button button-primary" id="submit-add">Aggiungi alla libreria</button></div>
+      </form>
+    </dialog>
+
+    <dialog class="modal" id="settings-modal">
+      <form id="settings-login-form">
+        <div class="modal-heading">
+          <div><p class="eyebrow">ACCOUNT F95ZONE</p><h2>Impostazioni</h2></div>
+          <button type="button" class="icon-button close-settings" aria-label="Chiudi">×</button>
+        </div>
+        <p class="settings-description">Collega il tuo account per leggere i thread riservati agli utenti autenticati. La password viene inoltrata a F95Zone via HTTPS solo durante l'accesso e non viene conservata; resta memorizzata solo la sessione nel volume locale dell'app.</p>
+        <div id="auth-connected" class="auth-connected hidden">
+          <span class="pulse"></span>
+          <div><strong>Account collegato</strong><small id="auth-username"></small></div>
+          <button type="button" class="button button-quiet" id="logout-button">Disconnetti</button>
+        </div>
+        <div id="auth-login-fields">
+          <label class="field-label" for="f95-username">Nome utente F95Zone</label>
+          <input id="f95-username" name="username" type="text" required maxlength="120" autocomplete="username">
+          <label class="field-label" for="f95-password">Password</label>
+          <input id="f95-password" name="password" type="password" required maxlength="1024" autocomplete="current-password">
+          <p class="field-hint">L'app inoltra la password solo a F95Zone via HTTPS e non la conserva. La sessione memorizzata consente di aggiornare i metadati.</p>
+        </div>
+        <div class="modal-error hidden" id="auth-error" role="alert"></div>
+        <div class="modal-actions">
+          <button type="button" class="button button-quiet close-settings">Chiudi</button>
+          <button type="submit" class="button button-primary" id="login-button">Accedi a F95Zone</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="modal metadata-modal" id="metadata-modal">
+      <form id="metadata-form">
+        <div class="modal-heading">
+          <div><p class="eyebrow">METADATI IMPORTATI</p><h2>Modifica metadati</h2></div>
+          <button type="button" class="icon-button close-metadata" aria-label="Chiudi">×</button>
+        </div>
+        <label class="field-label" for="metadata-title">Titolo</label>
+        <input id="metadata-title" name="title" maxlength="300" required>
+        <label class="field-label" for="metadata-developer">Sviluppatore</label>
+        <input id="metadata-developer" name="developer" maxlength="300">
+        <label class="field-label" for="metadata-status">Stato</label>
+        <input id="metadata-status" name="game_status" maxlength="300" placeholder="Ongoing, Completed, Abandoned...">
+        <label class="field-label" for="metadata-engine">Engine</label>
+        <input id="metadata-engine" name="engine" maxlength="300" placeholder="Ren'Py, Unity...">
+        <label class="field-label" for="metadata-tags">Tag, separati da virgola</label>
+        <input id="metadata-tags" name="tags" maxlength="500">
+        <div class="modal-error hidden" id="metadata-error" role="alert"></div>
+        <div class="modal-actions">
+          <button type="button" class="button button-quiet close-metadata">Annulla</button>
+          <button type="submit" class="button button-primary">Salva metadati</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="modal detail-modal" id="detail-modal">
+      <div id="detail-content"></div>
+    </dialog>
+    <script src="/app.js" defer></script>
+  </body>
+</html>

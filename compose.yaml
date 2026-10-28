@@ -1,0 +1,14 @@
+services:
+  f95-library:
+    build: .
+    container_name: f95-library
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8000"
+    environment:
+      SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS:-21600}
+    volumes:
+      - f95-library-data:/data
+
+volumes:
+  f95-library-data:

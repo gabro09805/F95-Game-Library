@@ -1,0 +1,8 @@
+services:
+  f95-library:
+    command: ["python", "-B", "dev.py"]
+    environment:
+      DEV_MODE: "1"
+    volumes:
+      - .:/app:ro
+      - f95-library-data:/data
