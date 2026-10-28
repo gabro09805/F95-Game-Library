@@ -63,6 +63,7 @@ const notice = document.querySelector("#notice");
 const addModal = document.querySelector("#add-modal");
 const settingsModal = document.querySelector("#settings-modal");
 const detailModal = document.querySelector("#detail-modal");
+const photoViewer = document.querySelector("#photo-viewer");
 const metadataModal = document.querySelector("#metadata-modal");
 const deleteConfirmModal = document.querySelector("#delete-confirm-modal");
 const syncSummaryModal = document.querySelector("#sync-summary-modal");
@@ -81,6 +82,8 @@ let syncReportEpoch = "";
 let syncReportSaveFailed = false;
 let catalogSyncPending = false;
 let syncNoticeTimeout;
+let photoViewerImages = [];
+let photoViewerIndex = 0;
 let draftFilters = null;
 let availableFilterOptions = null;
 let catalogFilterOptions = null;
@@ -419,6 +422,56 @@ function setupDetailTags(root) {
   });
 }
 
+function setupPhotoViewer(root) {
+  const images = [...root.querySelectorAll(".detail-cover, .image-gallery img")]
+    .filter((image) => image.dataset.fullImage);
+  if (!images.length) return;
+  photoViewerImages = images.map((image) => ({
+    url: image.dataset.fullImage,
+    alt: image.alt || "",
+  }));
+  images.forEach((image, index) => {
+    image.tabIndex = 0;
+    image.setAttribute("role", "button");
+    image.setAttribute("aria-label", `Apri immagine ${index + 1} di ${images.length} a schermo intero`);
+    image.addEventListener("click", () => openPhotoViewer(index));
+    image.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      openPhotoViewer(index);
+    });
+  });
+}
+
+function renderPhotoViewer() {
+  const image = photoViewerImages[photoViewerIndex];
+  if (!image) return;
+  document.querySelector("#photo-viewer-image").src = imageSource(image.url);
+  document.querySelector("#photo-viewer-image").alt = image.alt;
+  document.querySelector("#photo-viewer-caption").textContent =
+    `${photoViewerIndex + 1} / ${photoViewerImages.length}`;
+  document.querySelector("#photo-viewer-previous").disabled = photoViewerImages.length < 2;
+  document.querySelector("#photo-viewer-next").disabled = photoViewerImages.length < 2;
+}
+
+function openPhotoViewer(index) {
+  if (!photoViewerImages.length) return;
+  photoViewerIndex = index;
+  renderPhotoViewer();
+  photoViewer.showModal();
+}
+
+function navigatePhotoViewer(offset) {
+  if (!photoViewerImages.length) return;
+  photoViewerIndex = (photoViewerIndex + offset + photoViewerImages.length) % photoViewerImages.length;
+  renderPhotoViewer();
+}
+
+function closePhotoViewer() {
+  photoViewer.close();
+  document.querySelector("#photo-viewer-image").removeAttribute("src");
+}
+
 async function openCatalogDetails(threadId) {
   const game = state.catalog.games.find((item) => item.thread_id === threadId);
   if (!game) return;
@@ -437,11 +490,11 @@ async function openCatalogDetails(threadId) {
     const details = await api(`/api/catalog/details?thread_id=${encodeURIComponent(threadId)}`);
     const coverUrl = details.image_url || game.cover_url;
     const cover = coverUrl
-      ? `<img class="detail-cover" src="${escapeHtml(imageSource(coverUrl))}" alt="" onerror="this.remove()">`
+      ? `<img class="detail-cover" src="${escapeHtml(imageSource(coverUrl))}" data-full-image="${escapeHtml(coverUrl)}" alt="${escapeHtml(game.title)}" onerror="this.remove()">`
       : "";
     const galleryItems = [...new Set([...(details.gallery || []), game.cover_url].filter((image) => image && image !== coverUrl))];
     const gallery = galleryItems.map((image) =>
-      `<img src="${escapeHtml(imageSource(image))}" alt="Immagine di ${escapeHtml(game.title)}" loading="lazy" onerror="this.remove()">`
+      `<img src="${escapeHtml(imageSource(image))}" data-full-image="${escapeHtml(image)}" alt="Immagine di ${escapeHtml(game.title)}" loading="lazy" onerror="this.remove()">`
     ).join("");
     const metadataBadges = [
       details.game_status ? `<span class="metadata-badge status-${statusTone(details.game_status)}">${escapeHtml(details.game_status)}</span>` : "",
@@ -484,6 +537,7 @@ async function openCatalogDetails(threadId) {
         </div>
       </main>`;
     setupDetailTags(content);
+    setupPhotoViewer(content);
     document.querySelector("#catalog-detail-back").addEventListener("click", () => detailModal.close());
     document.querySelector(".catalog-detail-add")?.addEventListener("click", async (event) => {
       const button = event.currentTarget;
@@ -1047,12 +1101,12 @@ async function refreshAuthStatus() {
 
 function renderDetail(game) {
   const cover = game.image_url
-    ? `<img class="detail-cover" src="${escapeHtml(imageSource(game.image_url))}" alt="" onerror="this.remove()">`
+    ? `<img class="detail-cover" src="${escapeHtml(imageSource(game.image_url))}" data-full-image="${escapeHtml(game.image_url)}" alt="${escapeHtml(game.title)}" onerror="this.remove()">`
     : "";
   const detailTags = renderDetailTags(game.tags || []);
   const gallery = (game.gallery || [])
     .filter((image) => image !== game.image_url)
-    .map((image) => `<img src="${escapeHtml(imageSource(image))}" alt="" loading="lazy" onerror="this.remove()">`)
+    .map((image) => `<img src="${escapeHtml(imageSource(image))}" data-full-image="${escapeHtml(image)}" alt="Immagine di ${escapeHtml(game.title)}" loading="lazy" onerror="this.remove()">`)
     .join("");
   document.querySelector("#detail-content").innerHTML = `
     <header class="detail-page-header">
@@ -1121,6 +1175,7 @@ function renderDetail(game) {
       </div>
     </main>`;
   setupDetailTags(document.querySelector("#detail-content"));
+  setupPhotoViewer(document.querySelector("#detail-content"));
   document.querySelector("#detail-close").addEventListener("click", () => detailModal.close());
   document.querySelector("#detail-sync").addEventListener("click", () => queueSync(game.id));
   document.querySelector("#edit-metadata").addEventListener("click", () => openMetadataEditor(game));
@@ -1821,6 +1876,20 @@ document.querySelector("#add-form").addEventListener("submit", async (event) => 
   }
 });
 document.addEventListener("keydown", (event) => {
+  if (photoViewer.open) {
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      navigatePhotoViewer(-1);
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      navigatePhotoViewer(1);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closePhotoViewer();
+    }
+    return;
+  }
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
     event.preventDefault();
     document.querySelector("#search-input").focus();
@@ -1829,6 +1898,15 @@ document.addEventListener("keydown", (event) => {
 });
 detailModal.addEventListener("click", (event) => {
   if (event.target === detailModal) detailModal.close();
+});
+document.querySelector("#photo-viewer-close").addEventListener("click", closePhotoViewer);
+document.querySelector("#photo-viewer-previous").addEventListener("click", () => navigatePhotoViewer(-1));
+document.querySelector("#photo-viewer-next").addEventListener("click", () => navigatePhotoViewer(1));
+photoViewer.addEventListener("click", (event) => {
+  if (event.target === photoViewer) closePhotoViewer();
+});
+photoViewer.addEventListener("close", () => {
+  document.querySelector("#photo-viewer-image").removeAttribute("src");
 });
 
 initializeTheme();

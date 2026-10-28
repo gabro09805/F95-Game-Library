@@ -404,6 +404,15 @@
     <dialog class="modal detail-modal" id="detail-modal">
       <div id="detail-content"></div>
     </dialog>
+    <dialog class="photo-viewer" id="photo-viewer" aria-label="Visualizzatore immagini">
+      <button type="button" class="photo-viewer-close" id="photo-viewer-close" aria-label="Chiudi immagine">×</button>
+      <button type="button" class="photo-viewer-nav photo-viewer-previous" id="photo-viewer-previous" aria-label="Immagine precedente">‹</button>
+      <figure class="photo-viewer-figure">
+        <img id="photo-viewer-image" alt="">
+        <figcaption id="photo-viewer-caption" aria-live="polite"></figcaption>
+      </figure>
+      <button type="button" class="photo-viewer-nav photo-viewer-next" id="photo-viewer-next" aria-label="Immagine successiva">›</button>
+    </dialog>
     <script src="/app.js" defer></script>
   </body>
 </html>
