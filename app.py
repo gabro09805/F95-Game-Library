@@ -1666,6 +1666,32 @@ def get_game(game_id):
     return game_to_dict(row) if row else None
 
 
+def delete_games(game_ids):
+    if not isinstance(game_ids, list) or not game_ids:
+        raise ValueError("Seleziona almeno un gioco da rimuovere.")
+    if any(isinstance(game_id, bool) or not isinstance(game_id, int) or game_id < 1 for game_id in game_ids):
+        raise ValueError("La selezione dei giochi non è valida.")
+    game_ids = list(dict.fromkeys(game_ids))
+    with database() as db:
+        existing_ids = set()
+        for start in range(0, len(game_ids), 500):
+            batch = game_ids[start:start + 500]
+            placeholders = ",".join("?" for _ in batch)
+            existing_ids.update(
+                row["id"] for row in db.execute(
+                    f"SELECT id FROM games WHERE id IN ({placeholders})",
+                    batch,
+                ).fetchall()
+            )
+        if len(existing_ids) != len(game_ids):
+            raise ValueError("Uno o più giochi selezionati non sono più presenti nella libreria.")
+        for start in range(0, len(game_ids), 500):
+            batch = game_ids[start:start + 500]
+            placeholders = ",".join("?" for _ in batch)
+            db.execute(f"DELETE FROM games WHERE id IN ({placeholders})", batch)
+    return len(game_ids)
+
+
 GAME_SORT_COLUMNS = {
     "name": "title COLLATE NOCASE",
     "updated": "thread_updated_at",
@@ -2327,6 +2353,14 @@ class LibraryHandler(SimpleHTTPRequestHandler):
         if path == "/api/settings/auth":
             logout_f95zone()
             self.send_json({"logged_in": False, "username": None})
+            return
+        if path == "/api/games":
+            try:
+                deleted = delete_games(parse_json_body(self).get("ids"))
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, 400)
+                return
+            self.send_json({"deleted": deleted})
             return
         match = re.fullmatch(r"/api/games/(\d+)", path)
         if not match:

@@ -73,6 +73,10 @@ kbd { border: 1px solid #35363e; border-radius: 4px; padding: 2px 5px; color: #7
 .quick-filter select { max-width: 150px; padding: 9px 24px 9px 9px; border: 1px solid #35363e; border-radius: 6px; color: #d7d6de; background: #17181d; font-size: 12px; letter-spacing: 0; }
 .filters-button { flex: 0 0 auto; min-height: 36px; padding: 0 11px; font-size: 12px; }
 .filter-count { display: inline-grid; min-width: 17px; height: 17px; place-items: center; padding: 0 4px; border-radius: 9px; color: #17131e; background: #c3adff; font-size: 9px; }
+.toolbar-actions { display: flex; align-items: center; justify-content: flex-end; gap: 16px; }
+.selection-controls { display: flex; align-items: center; gap: 7px; }
+.selection-controls .button { min-height: 34px; padding: 0 10px; white-space: nowrap; }
+.selection-count { color: #aaa9b4; font-size: 11px; white-space: nowrap; }
 .sort-controls { display: flex; align-items: center; gap: 8px; color: #a4a4af; font-size: 11px; font-weight: 700; letter-spacing: .35px; }
 .sort-controls select { max-width: 250px; padding: 9px 28px 9px 10px; border: 1px solid #35363e; border-radius: 6px; color: #d7d6de; background: #17181d; font-size: 12px; letter-spacing: 0; }
 .sort-direction { width: 34px; height: 34px; border: 1px solid #35363e; border-radius: 6px; color: #c9b8ff; background: #1b1b22; font-size: 18px; }
@@ -162,6 +166,10 @@ kbd { border: 1px solid #35363e; border-radius: 4px; padding: 2px 5px; color: #7
 .catalog-filters-modal .modal-actions { position: sticky; z-index: 3; bottom: -20px; flex: 0 0 auto; margin: 18px -24px -20px; padding: 12px 24px 20px; border-top: 1px solid #393640; background: #191a20; }
 .game-card { min-width: 0; overflow: hidden; border: 1px solid #292a31; border-radius: 9px; background: var(--surface); transition: transform .16s ease, border-color .16s ease; cursor: pointer; }
 .game-card:hover { transform: translateY(-3px); border-color: #5b4b73; }
+.game-card.is-selected { border-color: #a48aff; box-shadow: 0 0 0 2px #a48aff44; }
+.game-grid.selection-mode .game-card { cursor: pointer; }
+.game-selection-toggle { position: absolute; right: 9px; bottom: 9px; width: 31px; height: 31px; display: grid; place-items: center; border: 1px solid #ffffff70; border-radius: 50%; color: #fff; background: #17131ed9; font-size: 16px; font-weight: 700; box-shadow: 0 2px 8px #0008; }
+.game-selection-toggle[aria-pressed="true"] { border-color: #c4b1ff; color: #17131e; background: #c4b1ff; }
 .cover-wrap { position: relative; aspect-ratio: 1.56 / 1; overflow: hidden; background: linear-gradient(140deg, #2a2934, #1d1b25); }
 .cover-wrap img { width: 100%; height: 100%; object-fit: contain; display: block; }
 .cover-fallback { width: 100%; height: 100%; display: grid; place-items: center; color: #bb9aff; font: 800 42px "Segoe UI", Arial, sans-serif; background: radial-gradient(ellipse at 70% 25%, #4b365f, #25232d 55%, #1b1c22); }
@@ -460,7 +468,7 @@ kbd { border: 1px solid #35363e; border-radius: 4px; padding: 2px 5px; color: #7
 :root[data-theme="light"] .notice:not(.error),
 :root[data-theme="light"] .catalog-notice { color: #765619; background: #fff5dc; border-color: #ead9aa; }
 
-@media (max-width: 1200px) { .game-grid, .catalog-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } .main-content { padding-right: 30px; padding-left: 30px; } }
+@media (max-width: 1200px) { .game-grid, .catalog-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } .main-content { padding-right: 30px; padding-left: 30px; } .toolbar { flex-wrap: wrap; } .search-tools, .toolbar-actions { width: 100%; flex-basis: 100%; } .toolbar-actions { justify-content: space-between; } }
 @media (max-width: 900px) { .sidebar { width: 205px; } .main-content { width: calc(100% - 205px); margin-left: 205px; padding-right: 23px; padding-left: 23px; } .game-grid, .catalog-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 620px) {
   .sidebar { position: static; width: auto; height: auto; min-height: 59px; flex-direction: row; flex-wrap: wrap; align-items: center; padding: 8px 15px; border-right: 0; border-bottom: 1px solid var(--line); }
@@ -490,6 +498,10 @@ kbd { border: 1px solid #35363e; border-radius: 4px; padding: 2px 5px; color: #7
   .quick-filter { flex: 1; }
   .quick-filter select { flex: 1; max-width: none; }
   .filters-button { min-height: 34px; }
+  .toolbar-actions { width: 100%; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  .selection-controls { gap: 5px; }
+  .selection-controls .button { min-height: 32px; padding: 0 8px; font-size: 10px; }
+  .selection-count { font-size: 10px; }
   .search-box kbd { display: none; }
   .toolbar { align-items: flex-start; gap: 8px; }
   .sort-controls { gap: 4px; }

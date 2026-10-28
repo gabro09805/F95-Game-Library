@@ -54,6 +54,8 @@ const state = {
   },
   games: [],
   activeGame: null,
+  selectionMode: false,
+  selectedGameIds: new Set(),
 };
 const grid = document.querySelector("#game-grid");
 const emptyState = document.querySelector("#empty-state");
@@ -252,10 +254,15 @@ async function loadGames() {
     values.forEach((value) => params.append(key, value));
   }
   state.games = await api(`/api/games?${params}`);
+  const visibleGameIds = new Set(state.games.map((game) => game.id));
+  state.selectedGameIds = new Set(
+    [...state.selectedGameIds].filter((gameId) => visibleGameIds.has(gameId)),
+  );
   renderGames();
 }
 
 function switchPage(page) {
+  if (page !== "library") exitGameSelection();
   state.pageView = page;
   document.querySelector("#library-view").classList.toggle("hidden", page !== "library");
   document.querySelector("#catalog-view").classList.toggle("hidden", page !== "catalog");
@@ -892,13 +899,16 @@ function renderGames() {
       game.engine ? `<span class="card-badge card-engine">${escapeHtml(game.engine)}</span>` : "",
     ].filter(Boolean).join("");
     return `
-      <article class="game-card" data-id="${game.id}" tabindex="0" aria-label="Apri ${escapeHtml(game.title)}">
+      <article class="game-card${state.selectedGameIds.has(game.id) ? " is-selected" : ""}" data-id="${game.id}" tabindex="0" aria-label="${state.selectionMode ? `Seleziona ${escapeHtml(game.title)}` : `Apri ${escapeHtml(game.title)}`}">
         <div class="cover-wrap">
           ${cover}<div class="cover-fallback">${escapeHtml((game.title || "?").slice(0, 1).toUpperCase())}</div>
           <span class="status-pill">${escapeHtml(gameStatusLabel(game.personal_status))}</span>
           ${game.last_error
             ? '<span class="update-pill error-pill">⚠ Verifica fallita</span>'
             : game.update_available ? '<span class="update-pill">✦ Update</span>' : ""}
+          ${state.selectionMode
+            ? `<button type="button" class="game-selection-toggle" data-select-game="${game.id}" aria-label="${state.selectedGameIds.has(game.id) ? "Deseleziona" : "Seleziona"} ${escapeHtml(game.title)}" aria-pressed="${state.selectedGameIds.has(game.id)}">${state.selectedGameIds.has(game.id) ? "✓" : ""}</button>`
+            : ""}
         </div>
         <div class="card-body">
           <h2 class="card-title">${escapeHtml(game.title)}</h2>
@@ -914,14 +924,59 @@ function renderGames() {
       </article>`;
   }).join("");
   grid.querySelectorAll(".game-card").forEach((card) => {
-    const open = () => openDetails(Number(card.dataset.id));
-    card.addEventListener("click", open);
+    card.addEventListener("click", (event) => {
+      if (event.target.closest("[data-select-game]")) return;
+      const gameId = Number(card.dataset.id);
+      if (state.selectionMode) {
+        toggleGameSelection(gameId);
+      } else {
+        openDetails(gameId);
+      }
+    });
     card.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); }
+      if (event.target !== card || (event.key !== "Enter" && event.key !== " ")) return;
+      event.preventDefault();
+      const gameId = Number(card.dataset.id);
+      if (state.selectionMode) toggleGameSelection(gameId);
+      else openDetails(gameId);
+    });
+    card.querySelector("[data-select-game]")?.addEventListener("click", (event) => {
+      event.stopPropagation();
+      toggleGameSelection(Number(event.currentTarget.dataset.selectGame));
     });
   });
+  grid.classList.toggle("selection-mode", state.selectionMode);
+  renderGameSelectionControls();
   emptyState.classList.toggle("hidden", games.length > 0);
   grid.classList.toggle("hidden", games.length === 0);
+}
+
+function renderGameSelectionControls() {
+  const toggleButton = document.querySelector("#select-games-button");
+  const count = state.selectedGameIds.size;
+  toggleButton.setAttribute("aria-pressed", String(state.selectionMode));
+  toggleButton.textContent = state.selectionMode ? "Selezione attiva" : "Seleziona";
+  document.querySelector("#selection-count").textContent =
+    `${count} ${count === 1 ? "selezionato" : "selezionati"}`;
+  document.querySelector("#selection-count").classList.toggle("hidden", !state.selectionMode);
+  const removeButton = document.querySelector("#bulk-delete-button");
+  removeButton.textContent = `Rimuovi${count ? ` (${count})` : ""}`;
+  removeButton.disabled = count === 0;
+  removeButton.classList.toggle("hidden", !state.selectionMode);
+  document.querySelector("#cancel-selection-button").classList.toggle("hidden", !state.selectionMode);
+}
+
+function toggleGameSelection(gameId) {
+  if (state.selectedGameIds.has(gameId)) state.selectedGameIds.delete(gameId);
+  else state.selectedGameIds.add(gameId);
+  renderGames();
+}
+
+function exitGameSelection() {
+  state.selectionMode = false;
+  state.selectedGameIds.clear();
+  renderGameSelectionControls();
+  grid.classList.remove("selection-mode");
 }
 
 function openAddModal() {
@@ -1164,19 +1219,53 @@ async function markUpdateSeen(id) {
   } catch (error) { showNotice(error.message, true); }
 }
 
-async function deleteGame(id) {
-  document.querySelector("#delete-confirm-title").textContent = `Rimuovere ${state.activeGame?.title || "questo gioco"}?`;
+async function confirmGameRemoval(title, message, buttonText) {
+  document.querySelector("#delete-confirm-title").textContent = title;
+  document.querySelector("#delete-confirm-message").textContent = message;
+  document.querySelector("#delete-confirm-form .button-danger").textContent = buttonText;
   deleteConfirmModal.returnValue = "";
   deleteConfirmModal.showModal();
   await new Promise((resolve) => {
     deleteConfirmModal.addEventListener("close", resolve, { once: true });
   });
-  if (deleteConfirmModal.returnValue !== "delete") return;
+  return deleteConfirmModal.returnValue === "delete";
+}
+
+async function deleteGame(id) {
+  const confirmed = await confirmGameRemoval(
+    `Rimuovere ${state.activeGame?.title || "questo gioco"}?`,
+    "Il gioco e le relative note personali verranno eliminati dalla libreria. L'azione non può essere annullata.",
+    "Rimuovi gioco",
+  );
+  if (!confirmed) return;
   try {
     await api(`/api/games/${id}`, { method: "DELETE" });
     detailModal.close();
     await loadGames();
     showNotice("Gioco rimosso dalla libreria.");
+  } catch (error) { showNotice(error.message, true); }
+}
+
+async function deleteSelectedGames() {
+  const gameIds = [...state.selectedGameIds];
+  if (!gameIds.length) return;
+  const confirmed = await confirmGameRemoval(
+    `Rimuovere ${gameIds.length} ${gameIds.length === 1 ? "gioco selezionato" : "giochi selezionati"}?`,
+    "I giochi selezionati e le relative note personali verranno eliminati dalla libreria. L'azione non può essere annullata.",
+    "Rimuovi giochi",
+  );
+  if (!confirmed) return;
+  try {
+    const result = await api("/api/games", {
+      method: "DELETE",
+      body: JSON.stringify({ ids: gameIds }),
+    });
+    if (result.deleted !== gameIds.length) {
+      throw new Error("Non è stato possibile rimuovere tutti i giochi selezionati.");
+    }
+    exitGameSelection();
+    await loadGames();
+    showNotice(`${result.deleted} ${result.deleted === 1 ? "gioco rimosso" : "giochi rimossi"} dalla libreria.`);
   } catch (error) { showNotice(error.message, true); }
 }
 
@@ -1418,6 +1507,23 @@ document.querySelector("#save-settings").addEventListener("click", async (event)
   }
 });
 document.querySelector("#sync-button").addEventListener("click", () => queueSync());
+document.querySelector("#select-games-button").addEventListener("click", () => {
+  if (state.selectionMode) {
+    exitGameSelection();
+    renderGames();
+    return;
+  }
+  state.selectionMode = true;
+  state.selectedGameIds.clear();
+  renderGames();
+});
+document.querySelector("#cancel-selection-button").addEventListener("click", () => {
+  exitGameSelection();
+  renderGames();
+});
+document.querySelector("#bulk-delete-button").addEventListener("click", () => {
+  deleteSelectedGames().catch((error) => showNotice(error.message, true));
+});
 document.querySelector("#filters-button").addEventListener("click", () => {
   openFilters().catch((error) => showNotice(error.message, true));
 });

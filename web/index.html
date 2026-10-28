@@ -73,18 +73,26 @@
               Filtri <span class="filter-count hidden" id="filter-count">0</span>
             </button>
           </div>
-          <div class="sort-controls">
-            <label for="sort-select">ORDINA PER</label>
-            <select id="sort-select" aria-label="Ordina i giochi">
-              <option value="name">Nome</option>
-              <option value="updated">Data aggiornamento ultima versione</option>
-              <option value="added">Data inserimento</option>
-              <option value="rating">Valutazione</option>
-              <option value="likes">Mi piace</option>
-              <option value="views">Visualizzazioni</option>
-            </select>
-            <button type="button" class="sort-direction" id="sort-direction" aria-label="Inverti ordine" title="Inverti ordine">↑</button>
-            <span class="sort-order-label" id="sort-order-label">A–Z</span>
+          <div class="toolbar-actions">
+            <div class="selection-controls">
+              <button type="button" class="button button-quiet" id="select-games-button" aria-pressed="false">Seleziona</button>
+              <span class="selection-count hidden" id="selection-count" aria-live="polite"></span>
+              <button type="button" class="button button-danger hidden" id="bulk-delete-button" disabled>Rimuovi</button>
+              <button type="button" class="button button-quiet hidden" id="cancel-selection-button">Annulla</button>
+            </div>
+            <div class="sort-controls">
+              <label for="sort-select">ORDINA PER</label>
+              <select id="sort-select" aria-label="Ordina i giochi">
+                <option value="name">Nome</option>
+                <option value="updated">Data aggiornamento ultima versione</option>
+                <option value="added">Data inserimento</option>
+                <option value="rating">Valutazione</option>
+                <option value="likes">Mi piace</option>
+                <option value="views">Visualizzazioni</option>
+              </select>
+              <button type="button" class="sort-direction" id="sort-direction" aria-label="Inverti ordine" title="Inverti ordine">↑</button>
+              <span class="sort-order-label" id="sort-order-label">A–Z</span>
+            </div>
           </div>
         </section>
 

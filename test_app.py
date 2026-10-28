@@ -689,6 +689,22 @@ class SyncTests(unittest.TestCase):
         cleared = app.update_game_fields(1, {"user_version": ""})
         self.assertIsNone(cleared["user_version_updated_at"])
 
+    def test_bulk_delete_removes_selected_games(self):
+        with app.database() as db:
+            db.execute(
+                "INSERT INTO games (thread_url, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                ("https://f95zone.to/threads/second.456/", "Second", app.now_iso(), app.now_iso()),
+            )
+
+        self.assertEqual(app.delete_games([1, 2]), 2)
+        self.assertEqual(app.list_games(), [])
+
+    def test_bulk_delete_rejects_missing_or_invalid_ids_without_partial_deletion(self):
+        for game_ids in ([1, 999], [], [True], ["1"]):
+            with self.subTest(game_ids=game_ids), self.assertRaises(ValueError):
+                app.delete_games(game_ids)
+            self.assertIsNotNone(app.get_game(1))
+
     def test_sync_saves_gallery_and_metadata(self):
         metadata = {
             "title": "Test Game",
