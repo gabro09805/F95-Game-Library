@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from http.cookiejar import Cookie
 from pathlib import Path
+from urllib.request import urlopen
 from unittest.mock import Mock, patch
 
 import app
@@ -42,6 +43,53 @@ class UrlValidationTests(unittest.TestCase):
             app.thread_id_from_url("https://f95zone.to/threads/12345/"),
             12345,
         )
+
+
+class DevelopmentVersionTests(unittest.TestCase):
+    def test_source_hash_is_reused_while_file_metadata_is_unchanged(self):
+        sha256 = app.hashlib.sha256
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "app.py"
+            source.write_text("first version", encoding="utf-8")
+            with (
+                patch.object(app, "ROOT", root),
+                patch.object(app, "DEV_VERSION_SNAPSHOT", None),
+                patch.object(app, "DEV_VERSION_HASH", ""),
+                patch.object(app.hashlib, "sha256", wraps=sha256) as create_hash,
+            ):
+                first = app.development_source_version()
+                second = app.development_source_version()
+                source.write_text("updated source version", encoding="utf-8")
+                third = app.development_source_version()
+
+        self.assertEqual(first, second)
+        self.assertNotEqual(first, third)
+        self.assertEqual(create_hash.call_count, 2)
+
+
+class CachedImageResponseTests(unittest.TestCase):
+    def test_cached_gif_is_streamed_without_changing_its_bytes(self):
+        image_bytes = b"GIF89a\x01\x00\x01\x00"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "animation.gif"
+            image_path.write_bytes(image_bytes)
+            server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.LibraryHandler)
+            thread = threading.Thread(target=server.serve_forever)
+            thread.start()
+            try:
+                with (
+                    patch.object(app, "get_cached_f95_image_file", return_value=(image_path, "image/gif")),
+                    patch.object(app, "fetch_f95_image") as fetch_image,
+                    urlopen(f"http://127.0.0.1:{server.server_port}/api/image?url=https%3A%2F%2Fattachments.f95zone.to%2Fanimation.gif") as response,
+                ):
+                    self.assertEqual(response.headers.get_content_type(), "image/gif")
+                    self.assertEqual(response.read(), image_bytes)
+                fetch_image.assert_not_called()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join()
 
 
 class MetadataParserTests(unittest.TestCase):
@@ -727,7 +775,7 @@ class SyncTests(unittest.TestCase):
         started = threading.Event()
         continue_sync = threading.Event()
 
-        def fake_sync(game_id):
+        def fake_sync(game_id, *, prune_cache=True):
             started.set()
             continue_sync.wait(2)
             return app.get_game(game_id)
@@ -752,6 +800,26 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(completed["completed"], 1)
         self.assertEqual(completed["total"], 1)
 
+    def test_sync_queue_prunes_image_cache_once_for_the_batch(self):
+        with app.database() as db:
+            db.execute(
+                "INSERT INTO games (thread_url, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                ("https://f95zone.to/threads/second.456/", "Second", app.now_iso(), app.now_iso()),
+            )
+
+        with (
+            patch.object(app, "sync_game", side_effect=lambda game_id, *, prune_cache=True: app.get_game(game_id)),
+            patch.object(app, "prune_image_cache") as prune_cache,
+        ):
+            app.queue_sync_jobs([1, 2], report_changes=False)
+            for _ in range(100):
+                if not app.get_sync_progress()["active"]:
+                    break
+                threading.Event().wait(0.01)
+
+        self.assertFalse(app.get_sync_progress()["active"])
+        prune_cache.assert_called_once_with()
+
     def test_sync_queue_processes_rapid_additions_sequentially(self):
         started = threading.Event()
         continue_sync = threading.Event()
@@ -762,7 +830,7 @@ class SyncTests(unittest.TestCase):
                 ("https://f95zone.to/threads/second.456/", "Second", app.now_iso(), app.now_iso()),
             )
 
-        def fake_sync(game_id):
+        def fake_sync(game_id, *, prune_cache=True):
             synced_ids.append(game_id)
             if game_id == 1:
                 started.set()
@@ -793,7 +861,7 @@ class SyncTests(unittest.TestCase):
                 ("https://f95zone.to/threads/second.456/", "Second", app.now_iso(), app.now_iso()),
             )
 
-        def fake_sync(game_id):
+        def fake_sync(game_id, *, prune_cache=True):
             synced_ids.append(game_id)
             if game_id == 1:
                 started.set()
@@ -820,7 +888,7 @@ class SyncTests(unittest.TestCase):
         started = threading.Event()
         continue_sync = threading.Event()
 
-        def fake_sync(game_id):
+        def fake_sync(game_id, *, prune_cache=True):
             started.set()
             continue_sync.wait(2)
             return app.get_game(game_id)

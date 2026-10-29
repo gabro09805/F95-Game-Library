@@ -54,6 +54,9 @@ SYNC_PROGRESS = {
 CATALOG_FILTER_CACHE = {"expires_at": 0, "options": None}
 CATALOG_FILTER_LOCK = threading.Lock()
 F95_LOCK = threading.Lock()
+DEV_VERSION_LOCK = threading.Lock()
+DEV_VERSION_SNAPSHOT = None
+DEV_VERSION_HASH = ""
 
 
 def is_allowed_image_host(hostname):
@@ -1545,6 +1548,17 @@ def cache_thread_images(metadata):
 
 
 def get_cached_f95_image(image_url):
+    cached = get_cached_f95_image_file(image_url)
+    if not cached:
+        return None
+    path, content_type = cached
+    try:
+        return path.read_bytes(), content_type
+    except FileNotFoundError:
+        return None
+
+
+def get_cached_f95_image_file(image_url):
     with database() as db:
         cached = db.execute(
             "SELECT filename, content_type FROM image_cache WHERE source_url = ? AND last_error = ''",
@@ -1554,9 +1568,10 @@ def get_cached_f95_image(image_url):
         return None
     path = image_cache_directory() / cached["filename"]
     try:
-        return path.read_bytes(), cached["content_type"]
+        path.stat()
     except FileNotFoundError:
         return None
+    return path, cached["content_type"]
 
 
 def prune_image_cache():
@@ -1600,6 +1615,33 @@ def get_image_cache_errors(image_urls):
             image_urls,
         ).fetchall()
     return [row["last_error"] for row in rows]
+
+
+def development_source_version():
+    global DEV_VERSION_SNAPSHOT, DEV_VERSION_HASH
+    source_paths = sorted(
+        (
+            path for path in ROOT.rglob("*")
+            if path.is_file()
+            and path.suffix in {".py", ".html", ".css", ".js"}
+            and not any(part in {".git", "__pycache__", ".venv", "venv"} for part in path.parts)
+        ),
+        key=lambda path: str(path.relative_to(ROOT)),
+    )
+    source_snapshot = []
+    for path in source_paths:
+        stat = path.stat()
+        source_snapshot.append((str(path.relative_to(ROOT)), stat.st_mtime_ns, stat.st_size))
+    snapshot = tuple(source_snapshot)
+    with DEV_VERSION_LOCK:
+        if snapshot != DEV_VERSION_SNAPSHOT:
+            digest = hashlib.sha256()
+            for path, (relative_path, _, _) in zip(source_paths, snapshot):
+                digest.update(relative_path.encode("utf-8"))
+                digest.update(path.read_bytes())
+            DEV_VERSION_HASH = digest.hexdigest()
+            DEV_VERSION_SNAPSHOT = snapshot
+        return DEV_VERSION_HASH
 
 
 def login_f95zone(username, password):
@@ -1968,7 +2010,7 @@ def get_filter_options():
     }
 
 
-def sync_game(game_id):
+def sync_game(game_id, *, prune_cache=True):
     with SYNC_LOCK:
         game = get_game(game_id)
         if not game:
@@ -2013,7 +2055,8 @@ def sync_game(game_id):
                         new_timestamp, now_iso(), int(is_newer), now_iso(), game_id,
                     ),
                 )
-            prune_image_cache()
+            if prune_cache:
+                prune_image_cache()
         except ValueError as exc:
             with database() as db:
                 db.execute(
@@ -2125,19 +2168,33 @@ def run_sync_queue():
                         SYNC_PROGRESS["report_error"] = str(exc)
                         print(f"Errore durante il salvataggio del riepilogo di sincronizzazione: {exc}", flush=True)
                     SYNC_PENDING_CHANGES.clear()
+                SYNC_CURRENT_ID = None
+                queue_empty = True
+            else:
+                queue_empty = False
+                game_id = SYNC_QUEUE.pop(0)
+                SYNC_CURRENT_ID = game_id
+        if queue_empty:
+            try:
+                with SYNC_LOCK:
+                    prune_image_cache()
+            except (OSError, sqlite3.Error) as exc:
+                print(f"Errore durante la pulizia della cache immagini: {exc}", flush=True)
+                with SYNC_PROGRESS_LOCK:
+                    SYNC_PROGRESS["errors"] += 1
+            with SYNC_PROGRESS_LOCK:
+                if SYNC_QUEUE:
+                    continue
                 SYNC_REPORT_GAME_IDS.clear()
                 SYNC_PROGRESS["active"] = False
                 SYNC_PROGRESS["current_title"] = ""
-                SYNC_CURRENT_ID = None
                 return
-            game_id = SYNC_QUEUE.pop(0)
-            SYNC_CURRENT_ID = game_id
         game = get_game(game_id)
         with SYNC_PROGRESS_LOCK:
             SYNC_PROGRESS["current_title"] = game["title"] if game else ""
         try:
             previous = game
-            result = sync_game(game_id)
+            result = sync_game(game_id, prune_cache=False)
             if result and result.get("last_error"):
                 with SYNC_PROGRESS_LOCK:
                     SYNC_PROGRESS["errors"] += 1
@@ -2332,23 +2389,36 @@ class LibraryHandler(SimpleHTTPRequestHandler):
         parts = urlsplit(self.path)
         if parts.path == "/api/image":
             image_url = parse_qs(parts.query).get("url", [""])[0]
-            cached_image = get_cached_f95_image(image_url)
+            cached_image = get_cached_f95_image_file(image_url)
             if cached_image:
-                content, content_type = cached_image
-            else:
+                path, content_type = cached_image
                 try:
-                    content, content_type = fetch_f95_image(image_url)
-                except ValueError as exc:
-                    self.send_json({"error": str(exc)}, 400)
+                    image_file = path.open("rb")
+                except FileNotFoundError:
+                    image_file = None
+                if image_file:
+                    with image_file:
+                        self.send_response(200)
+                        self.send_header("Content-Type", content_type)
+                        self.send_header("Content-Length", str(os.fstat(image_file.fileno()).st_size))
+                        self.send_header("Cache-Control", "public, max-age=3600")
+                        self.send_header("X-Content-Type-Options", "nosniff")
+                        self.end_headers()
+                        while chunk := image_file.read(64 * 1024):
+                            self.wfile.write(chunk)
                     return
-            body = content
+            try:
+                content, content_type = fetch_f95_image(image_url)
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, 400)
+                return
             self.send_response(200)
             self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Length", str(len(content)))
             self.send_header("Cache-Control", "public, max-age=3600")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
-            self.wfile.write(body)
+            self.wfile.write(content)
             return
         if parts.path == "/api/games":
             query = parse_qs(parts.query)
@@ -2422,17 +2492,7 @@ class LibraryHandler(SimpleHTTPRequestHandler):
             self.send_json({"ok": True})
             return
         if parts.path == "/api/dev/version" and DEV_MODE:
-            source_paths = [
-                path for path in ROOT.rglob("*")
-                if path.is_file()
-                and path.suffix in {".py", ".html", ".css", ".js"}
-                and not any(part in {".git", "__pycache__", ".venv", "venv"} for part in path.parts)
-            ]
-            digest = hashlib.sha256()
-            for path in sorted(source_paths):
-                digest.update(str(path.relative_to(ROOT)).encode("utf-8"))
-                digest.update(path.read_bytes())
-            self.send_json({"dev": True, "version": digest.hexdigest()})
+            self.send_json({"dev": True, "version": development_source_version()})
             return
         if parts.path == "/api/settings/auth":
             self.send_json(f95_session_status())

@@ -75,6 +75,7 @@ let catalogSearchTimer;
 let syncStatusWasActive = false;
 let syncStatusPollFailed = false;
 let syncStatusPollInFlight = false;
+let syncProgressPollTimer;
 let syncReportsPollInFlight = false;
 let syncReportsPollFailed = false;
 let syncReportCursor = 0;
@@ -1362,6 +1363,7 @@ async function queueSync(id = null) {
       renderSyncProgress(result.progress);
       if (result.progress.active) {
         showNotice("Controllo F95Zone avviato. La libreria si aggiornerà tra poco.", false, "sync");
+        scheduleSyncProgressPoll(0);
       } else {
         hideNotice();
       }
@@ -1521,11 +1523,15 @@ async function pollSyncProgress() {
         catalogNotice.textContent = "";
         delete catalogNotice.dataset.noticeType;
       }
-      if (state.pageView === "catalog") await loadCatalog().catch(showCatalogError);
+      if (state.pageView === "catalog" && document.visibilityState === "visible") {
+        await loadCatalog().catch(showCatalogError);
+      }
     }
     if (wasActive && !progress.active) {
-      await loadGames();
-      if (detailModal.open && state.activeGame) {
+      if (document.visibilityState === "visible" && state.pageView === "library") {
+        await loadGames();
+      }
+      if (document.visibilityState === "visible" && detailModal.open && state.activeGame) {
         state.activeGame = await api(`/api/games/${state.activeGame.id}`);
         renderDetail(state.activeGame);
       }
@@ -1543,6 +1549,15 @@ async function pollSyncProgress() {
   } finally {
     syncStatusPollInFlight = false;
   }
+}
+
+function scheduleSyncProgressPoll(delay = syncStatusWasActive ? 1000 : 15000) {
+  clearTimeout(syncProgressPollTimer);
+  if (document.visibilityState === "hidden") return;
+  syncProgressPollTimer = setTimeout(async () => {
+    await pollSyncProgress();
+    scheduleSyncProgressPoll();
+  }, delay);
 }
 
 document.querySelector("#add-button").addEventListener("click", openAddModal);
@@ -1728,7 +1743,10 @@ document.querySelectorAll(".status-nav .nav-item").forEach((button) => button.ad
   renderSortDirection();
 }));
 document.querySelector("#catalog-nav-button").addEventListener("click", () => switchPage("catalog"));
-document.querySelector("#catalog-back-button").addEventListener("click", () => switchPage("library"));
+document.querySelector("#catalog-back-button").addEventListener("click", () => {
+  switchPage("library");
+  loadGames().catch((error) => showNotice(error.message, true));
+});
 document.querySelector("#catalog-search").addEventListener("input", (event) => {
   state.catalog.search = event.target.value.trim();
   state.catalog.page = 1;
@@ -1947,15 +1965,39 @@ loadGames().catch((error) => showNotice(error.message, true));
 api("/api/filters")
   .then((options) => populateQuickStatus(options.game_statuses))
   .catch((error) => showNotice(`Impossibile caricare i filtri: ${error.message}`, true));
-setInterval(() => loadGames().catch((error) => showNotice(error.message, true)), 15000);
-pollSyncProgress();
-setInterval(pollSyncProgress, 1000);
+setInterval(() => {
+  if (document.visibilityState === "visible" && state.pageView === "library") {
+    loadGames().catch((error) => showNotice(error.message, true));
+  }
+}, 15000);
+scheduleSyncProgressPoll(0);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") {
+    clearTimeout(syncProgressPollTimer);
+    return;
+  }
+  if (state.pageView === "library") {
+    loadGames().catch((error) => showNotice(error.message, true));
+  } else {
+    loadCatalog().catch(showCatalogError);
+  }
+  if (detailModal.open && state.activeGame) {
+    api(`/api/games/${state.activeGame.id}`)
+      .then((game) => {
+        state.activeGame = game;
+        renderDetail(game);
+      })
+      .catch((error) => showNotice(error.message, true));
+  }
+  scheduleSyncProgressPoll(0);
+});
 
 let devVersion;
 async function checkForDevelopmentChanges() {
   try {
     const response = await fetch("/api/dev/version", { cache: "no-store" });
-    if (!response.ok) return;
+    if (response.status === 404) return;
+    if (!response.ok) throw new Error(`Controllo sviluppo non riuscito: ${response.status}`);
     const status = await response.json();
     if (!status.dev) return;
     if (devVersion !== undefined && status.version !== devVersion) {
@@ -1966,6 +2008,6 @@ async function checkForDevelopmentChanges() {
   } catch {
     // The development server may restart while Python changes are being applied.
   }
+  setTimeout(checkForDevelopmentChanges, 1500);
 }
 checkForDevelopmentChanges();
-setInterval(checkForDevelopmentChanges, 1500);
