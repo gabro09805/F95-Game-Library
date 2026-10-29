@@ -186,6 +186,30 @@ function imageSource(value) {
   return value;
 }
 
+function imageIdentity(value) {
+  try {
+    const url = new URL(value, window.location.href);
+    const stableParams = [...url.searchParams.entries()]
+      .filter(([key]) => !["h", "e", "u"].includes(key.toLowerCase()))
+      .sort(([firstKey, firstValue], [secondKey, secondValue]) =>
+        firstKey.localeCompare(secondKey) || firstValue.localeCompare(secondValue));
+    return `${url.protocol}//${url.host.toLowerCase()}${url.pathname}?${new URLSearchParams(stableParams)}`;
+  } catch {
+    return value;
+  }
+}
+
+function uniqueImageUrls(images) {
+  const seen = new Set();
+  return images.filter((image) => {
+    if (!image) return false;
+    const identity = imageIdentity(image);
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
+}
+
 function updateDate(value) {
   if (!value) return "Data non disponibile";
   const date = new Date(value);
@@ -492,7 +516,11 @@ async function openCatalogDetails(threadId) {
     const cover = coverUrl
       ? `<img class="detail-cover" src="${escapeHtml(imageSource(coverUrl))}" data-full-image="${escapeHtml(coverUrl)}" alt="${escapeHtml(game.title)}" onerror="this.remove()">`
       : "";
-    const galleryItems = [...new Set([...(details.gallery || []), game.cover_url].filter((image) => image && image !== coverUrl))];
+    const coverIdentities = new Set(
+      [coverUrl, game.cover_url].filter(Boolean).map(imageIdentity),
+    );
+    const galleryItems = uniqueImageUrls(details.gallery || [])
+      .filter((image) => !coverIdentities.has(imageIdentity(image)));
     const gallery = galleryItems.map((image) =>
       `<img src="${escapeHtml(imageSource(image))}" data-full-image="${escapeHtml(image)}" alt="Immagine di ${escapeHtml(game.title)}" loading="lazy" onerror="this.remove()">`
     ).join("");

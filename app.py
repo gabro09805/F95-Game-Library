@@ -14,7 +14,7 @@ from html.parser import HTMLParser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit
 from urllib.parse import urljoin
 from urllib.request import HTTPCookieProcessor, HTTPRedirectHandler, Request, build_opener
 
@@ -34,7 +34,7 @@ ALLOWED_IMAGE_HOSTS = {
     "preview.f95zone.ninja",
 }
 MAX_PAGE_BYTES = 4 * 1024 * 1024
-MAX_IMAGE_BYTES = 12 * 1024 * 1024
+MAX_IMAGE_BYTES = 50 * 1024 * 1024
 DEV_MODE = os.environ.get("DEV_MODE") == "1"
 SYNC_LOCK = threading.Lock()
 SETTINGS_CHANGED = threading.Event()
@@ -414,6 +414,31 @@ def upgrade_f95_image_url(value):
     return url
 
 
+def image_url_identity(image_url):
+    normalized_url = upgrade_f95_image_url(image_url) or image_url
+    parsed = urlsplit(normalized_url)
+    stable_query = sorted(
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key.casefold() not in {"h", "e", "u"}
+    )
+    return parsed.scheme.lower(), parsed.netloc.lower(), parsed.path, urlencode(stable_query)
+
+
+def unique_image_urls(image_urls):
+    images = []
+    seen = set()
+    for image_url in image_urls:
+        if not isinstance(image_url, str) or not image_url:
+            continue
+        identity = image_url_identity(image_url)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        images.append(image_url)
+    return images
+
+
 def image_candidates(container):
     if not container:
         return
@@ -454,6 +479,7 @@ def first_image_url(post_body, og_image):
 
 def first_post_image_urls(post_body):
     images = []
+    seen = set()
     for candidate in image_candidates(post_body):
         image_url = upgrade_f95_image_url(candidate)
         if not image_url:
@@ -463,8 +489,11 @@ def first_post_image_urls(post_body):
             continue
         if re.search(r"(?:banner|_logo|title[-_]?card)", image_url, re.I):
             continue
-        if image_url not in images:
-            images.append(image_url)
+        identity = image_url_identity(image_url)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        images.append(image_url)
     return images[:40]
 
 
@@ -1462,10 +1491,10 @@ def image_cache_filename(image_url):
 
 
 def cache_thread_images(metadata):
-    image_urls = list(dict.fromkeys(
+    image_urls = unique_image_urls(
         url for url in [metadata.get("image_url", ""), *(metadata.get("gallery") or [])]
         if isinstance(url, str) and url
-    ))
+    )
     errors = []
     image_cache_directory().mkdir(parents=True, exist_ok=True)
     for image_url in image_urls:
@@ -1785,9 +1814,10 @@ def game_to_dict(row):
     except (TypeError, json.JSONDecodeError):
         game["tags"] = []
     try:
-        game["gallery"] = json.loads(game["gallery"])
+        gallery = json.loads(game["gallery"])
     except (TypeError, json.JSONDecodeError):
-        game["gallery"] = []
+        gallery = []
+    game["gallery"] = unique_image_urls(gallery) if isinstance(gallery, list) else []
     game["update_available"] = bool(game["update_available"])
     return game
 
@@ -1945,6 +1975,7 @@ def sync_game(game_id):
             return None
         try:
             metadata = fetch_thread_metadata(game["thread_url"])
+            metadata["gallery"] = unique_image_urls(metadata["gallery"])
             cache_thread_images(metadata)
             old_timestamp = game["thread_updated_at"]
             new_timestamp = metadata["thread_updated_at"]
@@ -1973,7 +2004,7 @@ def sync_game(game_id):
                     """,
                     (
                         metadata["title"], metadata["image_url"], metadata["description"],
-                        json.dumps(metadata["gallery"], ensure_ascii=False),
+                        json.dumps(unique_image_urls(metadata["gallery"]), ensure_ascii=False),
                         metadata["version"], metadata["version"], metadata.get("f95_rating"),
                         metadata.get("likes", 0), metadata.get("likes", 0),
                         metadata.get("views", 0), metadata.get("views", 0),

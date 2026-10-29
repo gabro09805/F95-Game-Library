@@ -1,10 +1,11 @@
 import json
+from email.message import Message
 import threading
 import tempfile
 import unittest
 from http.cookiejar import Cookie
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import app
 
@@ -130,6 +131,46 @@ class MetadataParserTests(unittest.TestCase):
         self.assertNotIn("Hidden content", result["description"])
         self.assertEqual(result["thread_updated_at"], "2026-10-26T00:00:00+00:00")
 
+    def test_extracts_lightbox_image_once_when_thumbnail_is_nested(self):
+        source = """
+        <h1 class="p-title-value">Example Game</h1>
+        <article class="message--post message-threadStarterPost">
+          <div class="bbWrapper">
+            <div data-lb-single-image="1">
+              <a href="https://attachments.f95zone.to/data/screenshot.jpg">
+                <div class="lbContainer-zoomer" data-src="https://attachments.f95zone.to/data/screenshot.jpg"></div>
+                <img class="bbImage" src="https://attachments.f95zone.to/data/screenshot.thumb.jpg">
+              </a>
+            </div>
+          </div>
+        </article>
+        """
+
+        result = app.parse_thread_metadata(source, "https://f95zone.to/threads/example.123/")
+
+        self.assertEqual(
+            result["gallery"],
+            ["https://attachments.f95zone.to/data/screenshot.jpg"],
+        )
+
+    def test_extracts_signed_image_url_variants_as_one_gallery_image(self):
+        source = """
+        <h1 class="p-title-value">Example Game</h1>
+        <article class="message--post message-threadStarterPost">
+          <div class="bbWrapper">
+            <img class="bbImage" src="https://attachments.f95zone.to/2026/04/screenshot.gif?h=first&e=123&u=456">
+            <img class="bbImage" src="https://attachments.f95zone.to/2026/04/screenshot.gif?h=second&e=123&u=456">
+          </div>
+        </article>
+        """
+
+        result = app.parse_thread_metadata(source, "https://f95zone.to/threads/example.123/")
+
+        self.assertEqual(
+            result["gallery"],
+            ["https://attachments.f95zone.to/2026/04/screenshot.gif?h=first&e=123&u=456"],
+        )
+
     def test_extracts_thread_likes_views_rating_and_status_prefix(self):
         html = """
         <html><body>
@@ -246,6 +287,40 @@ class ValidationTests(unittest.TestCase):
             app.fetch_f95_image("https://example.com/image.jpg")
         with self.assertRaises(ValueError):
             app.fetch_f95_image("http://attachments.f95zone.to/image.jpg")
+
+    def test_image_proxy_accepts_images_larger_than_12_mib_up_to_50_mib(self):
+        image_bytes = b"x" * (13 * 1024 * 1024)
+        headers = Message()
+        headers["Content-Type"] = "image/gif"
+
+        class FakeResponse:
+            def __init__(self):
+                self.headers = headers
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def geturl(self):
+                return "https://attachments.f95zone.to/data/large.gif"
+
+            def read(self, limit):
+                return image_bytes[:limit]
+
+        opener = Mock()
+        opener.open.return_value = FakeResponse()
+        with (
+            patch.object(app, "build_opener", return_value=opener),
+            patch.object(app, "load_f95_cookie_jar"),
+        ):
+            content, content_type = app.fetch_f95_image(
+                "https://attachments.f95zone.to/data/large.gif"
+            )
+
+        self.assertEqual(len(content), 13 * 1024 * 1024)
+        self.assertEqual(content_type, "image/gif")
 
 
 class GameListingTests(unittest.TestCase):
@@ -843,6 +918,27 @@ class SyncTests(unittest.TestCase):
         with patch.object(app, "fetch_thread_metadata", return_value=updated_metadata):
             app.sync_game(1)
         self.assertIsNone(app.get_cached_f95_image("https://attachments.f95zone.to/new-shot.jpg"))
+
+    def test_existing_gallery_hides_signed_url_duplicates(self):
+        with app.database() as db:
+            db.execute(
+                "UPDATE games SET gallery = ? WHERE id = 1",
+                (json.dumps([
+                    "https://attachments.f95zone.to/2026/04/screenshot.gif?h=first&e=123&u=456",
+                    "https://attachments.f95zone.to/2026/04/screenshot.gif?h=second&e=789&u=456",
+                    "https://attachments.f95zone.to/2026/04/another.png?h=third&e=123&u=456",
+                ]),),
+            )
+
+        game = app.get_game(1)
+
+        self.assertEqual(
+            game["gallery"],
+            [
+                "https://attachments.f95zone.to/2026/04/screenshot.gif?h=first&e=123&u=456",
+                "https://attachments.f95zone.to/2026/04/another.png?h=third&e=123&u=456",
+            ],
+        )
 
     def test_image_download_failure_is_visible_without_discarding_metadata(self):
         metadata = {
