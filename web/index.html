@@ -350,6 +350,19 @@
           <button type="button" class="button button-primary" id="save-settings">Salva impostazioni</button>
         </div>
       </section>
+      <section class="settings-section">
+        <div class="settings-section-heading">
+          <div><p class="eyebrow">MANUTENZIONE</p><h3>File temporanei</h3></div>
+        </div>
+        <div class="temporary-files-row">
+          <div class="temporary-files-info">
+            <p class="settings-description">Spazio recuperabile sul server: <strong id="temporary-files-summary" aria-live="polite">Calcolo in corso…</strong></p>
+            <p class="field-hint">Include file temporanei interrotti e immagini non più collegate ai giochi. La libreria e le immagini ancora utilizzate non vengono eliminate. La cache temporanea delle immagini del catalogo è gestita dal browser.</p>
+          </div>
+          <button type="button" class="button button-quiet" id="cleanup-temporary-files">Pulisci file temporanei</button>
+        </div>
+        <div class="modal-error hidden" id="temporary-files-error" role="alert"></div>
+      </section>
     </dialog>
 
     <dialog class="modal metadata-modal" id="metadata-modal">

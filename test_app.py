@@ -1159,6 +1159,83 @@ class AppSettingsTests(unittest.TestCase):
                 app.validate_sync_settings(settings)
 
 
+class TemporaryFileCleanupTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.old_db_path = app.DB_PATH
+        app.DB_PATH = Path(self.temp_dir.name) / "library.sqlite3"
+        app.initialize_db()
+        with app.database() as db:
+            db.execute(
+                "INSERT INTO games (thread_url, title, image_url, gallery, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    "https://f95zone.to/threads/kept-game.123/",
+                    "Kept game",
+                    "https://attachments.f95zone.to/kept.gif",
+                    "[]",
+                    app.now_iso(),
+                    app.now_iso(),
+                ),
+            )
+        self.cache_dir = app.image_cache_directory()
+        self.cache_dir.mkdir()
+        self.kept_url = "https://attachments.f95zone.to/kept.gif"
+        self.orphan_url = "https://attachments.f95zone.to/orphan.jpg"
+        (self.cache_dir / app.image_cache_filename(self.kept_url)).write_bytes(b"keep")
+        (self.cache_dir / app.image_cache_filename(self.orphan_url)).write_bytes(b"orphan")
+        (self.cache_dir / "untracked-image").write_bytes(b"untracked")
+        (self.cache_dir / "interrupted-download.tmp").write_bytes(b"temporary")
+        with app.database() as db:
+            for image_url in (self.kept_url, self.orphan_url):
+                db.execute(
+                    "INSERT INTO image_cache (source_url, filename, content_type, updated_at) VALUES (?, ?, ?, ?)",
+                    (
+                        image_url,
+                        app.image_cache_filename(image_url),
+                        "image/gif" if image_url == self.kept_url else "image/jpeg",
+                        app.now_iso(),
+                    ),
+                )
+        self.server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.LibraryHandler)
+        self.server_thread = threading.Thread(target=self.server.serve_forever)
+        self.server_thread.start()
+        self.addCleanup(self.cleanup)
+
+    def cleanup(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.server_thread.join()
+        app.DB_PATH = self.old_db_path
+        self.temp_dir.cleanup()
+
+    def test_settings_cleanup_reports_and_removes_only_unreferenced_files(self):
+        base_url = f"http://127.0.0.1:{self.server.server_port}/api/maintenance/temporary-files"
+        with urlopen(base_url) as response:
+            before = json.loads(response.read())
+        self.assertEqual(before, {"files": 3, "bytes": len(b"orphan") + len(b"untracked") + len(b"temporary")})
+
+        request = app.Request(
+            base_url,
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request) as response:
+            result = json.loads(response.read())
+
+        self.assertEqual(result["removed_files"], 3)
+        self.assertEqual(result["removed_bytes"], before["bytes"])
+        self.assertEqual(result["files"], 0)
+        self.assertEqual(result["bytes"], 0)
+        self.assertTrue((self.cache_dir / app.image_cache_filename(self.kept_url)).is_file())
+        self.assertIsNotNone(app.get_game(1))
+        with app.database() as db:
+            cached_urls = {
+                row["source_url"] for row in db.execute("SELECT source_url FROM image_cache")
+            }
+        self.assertEqual(cached_urls, {self.kept_url})
+
+
 class F95LoginTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()

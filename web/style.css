@@ -288,6 +288,12 @@ kbd { border: 1px solid #35363e; border-radius: 4px; padding: 2px 5px; color: #7
 .settings-interval input { width: 100%; padding: 9px 10px; border: 1px solid #35363e; border-radius: 7px; color: var(--text); background: #121317; }
 .settings-interval span { color: var(--muted); font-size: 11px; }
 .settings-section .modal-actions { margin-top: 16px; }
+.temporary-files-row { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+.temporary-files-info { min-width: 0; }
+.temporary-files-info .settings-description,
+.temporary-files-info .field-hint { margin: 0; }
+.temporary-files-info .field-hint { margin-top: 7px; }
+.temporary-files-row > .button { flex: 0 0 auto; }
 .auth-connected { display: flex; align-items: center; gap: 11px; padding: 13px; border: 1px solid #34353d; border-radius: 8px; background: #14151a; }
 .auth-connected > div { display: grid; flex: 1; gap: 3px; }
 .auth-connected strong { font-size: 12px; }

@@ -37,6 +37,8 @@ I cookie di sessione sono credenziali temporanee: l'app li conserva nel database
 
 In **Impostazioni** puoi scegliere il tema chiaro o scuro e la frequenza di controllo: manuale, ogni numero di ore, giorni o mesi. Il valore predefinito è ogni 6 ore; un mese corrisponde a 30 giorni. In modalità manuale puoi avviare il controllo con il pulsante ⟳. Le preferenze di aggiornamento sono conservate nel database locale e il tema nel browser. Se F95Zone rifiuta la sessione, l'errore è visibile nella scheda: accedi di nuovo da **Impostazioni**.
 
+La sezione **File temporanei** nelle Impostazioni mostra lo spazio recuperabile sul server e permette di rimuovere residui di download e immagini non più associate ai giochi. La pulizia non elimina la libreria né le immagini ancora utilizzate. La cache temporanea delle immagini del catalogo è gestita dal browser e non viene inclusa nel conteggio del server.
+
 Per i dettagli degli aggiornamenti e gli eventuali contenuti completi, apri il thread originale da una scheda gioco. Il rilevamento automatico segnala un update quando riconosce una data di post più recente nella pagina.
 
 ## Dati e limiti dell'MVP

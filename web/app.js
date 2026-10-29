@@ -152,6 +152,34 @@ function escapeHtml(value = "") {
   })[char]);
 }
 
+function formatBytes(bytes) {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${new Intl.NumberFormat("it-IT", { maximumFractionDigits: 1 }).format(value)} ${units[unitIndex]}`;
+}
+
+function renderTemporaryFilesStatus(status) {
+  document.querySelector("#temporary-files-summary").textContent =
+    `${status.files} file · ${formatBytes(status.bytes)}`;
+}
+
+async function loadTemporaryFilesStatus() {
+  const errorElement = document.querySelector("#temporary-files-error");
+  errorElement.classList.add("hidden");
+  try {
+    renderTemporaryFilesStatus(await api("/api/maintenance/temporary-files"));
+  } catch (error) {
+    errorElement.textContent = error.message;
+    errorElement.classList.remove("hidden");
+    document.querySelector("#temporary-files-summary").textContent = "Non disponibile";
+  }
+}
+
 function gameStatusLabel(status) {
   return statusNames[status] || "Da giocare";
 }
@@ -1071,9 +1099,10 @@ function openAddModal() {
 async function openSettings() {
   document.querySelector("#auth-error").classList.add("hidden");
   document.querySelector("#settings-error").classList.add("hidden");
+  document.querySelector("#temporary-files-error").classList.add("hidden");
   document.querySelector("#settings-login-form").reset();
   settingsModal.showModal();
-  await Promise.all([refreshAuthStatus(), loadAppSettings()]);
+  await Promise.all([refreshAuthStatus(), loadAppSettings(), loadTemporaryFilesStatus()]);
 }
 
 function applyTheme(theme, persist = false) {
@@ -1576,6 +1605,27 @@ document.querySelector("#theme-select").addEventListener("change", (event) => {
   }
 });
 document.querySelector("#sync-mode").addEventListener("change", updateSyncIntervalInput);
+document.querySelector("#cleanup-temporary-files").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  const errorElement = document.querySelector("#temporary-files-error");
+  button.disabled = true;
+  errorElement.classList.add("hidden");
+  try {
+    const result = await api("/api/maintenance/temporary-files", {
+      method: "POST",
+      body: "{}",
+    });
+    renderTemporaryFilesStatus(result);
+    showNotice(
+      `${result.removed_files} ${result.removed_files === 1 ? "file temporaneo rimosso" : "file temporanei rimossi"} (${formatBytes(result.removed_bytes)}).`,
+    );
+  } catch (error) {
+    errorElement.textContent = error.message;
+    errorElement.classList.remove("hidden");
+  } finally {
+    button.disabled = false;
+  }
+});
 document.querySelector("#save-settings").addEventListener("click", async (event) => {
   const button = event.currentTarget;
   const errorElement = document.querySelector("#settings-error");

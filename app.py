@@ -1602,6 +1602,87 @@ def prune_image_cache():
             print(f"Impossibile rimuovere l'immagine non più usata {row['filename']}: {exc}", flush=True)
 
 
+def temporary_file_cleanup_candidates():
+    referenced_urls = set()
+    with database() as db:
+        rows = db.execute("SELECT image_url, gallery FROM games").fetchall()
+        cache_rows = db.execute("SELECT source_url, filename FROM image_cache").fetchall()
+    for row in rows:
+        if row["image_url"]:
+            referenced_urls.add(row["image_url"])
+        try:
+            gallery = json.loads(row["gallery"])
+        except (TypeError, json.JSONDecodeError):
+            gallery = []
+        if isinstance(gallery, list):
+            referenced_urls.update(url for url in gallery if isinstance(url, str) and url)
+
+    protected_filenames = {
+        image_cache_filename(image_url)
+        for image_url in referenced_urls
+    }
+    protected_filenames.update(
+        row["filename"] for row in cache_rows
+        if row["source_url"] in referenced_urls
+    )
+    stale_urls = [
+        row["source_url"] for row in cache_rows
+        if row["source_url"] not in referenced_urls
+    ]
+    cache_directory = image_cache_directory()
+    candidates = []
+    if cache_directory.is_dir():
+        candidates = [
+            path for path in cache_directory.iterdir()
+            if path.is_file() and (
+                path.name.endswith(".tmp")
+                or path.name not in protected_filenames
+            )
+        ]
+    return candidates, stale_urls
+
+
+def temporary_file_cleanup_status():
+    with SYNC_LOCK:
+        with SYNC_PROGRESS_LOCK:
+            candidates, _ = temporary_file_cleanup_candidates()
+            return {
+                "files": len(candidates),
+                "bytes": sum(path.stat().st_size for path in candidates),
+            }
+
+
+def cleanup_temporary_files():
+    with SYNC_LOCK:
+        with SYNC_PROGRESS_LOCK:
+            candidates, stale_urls = temporary_file_cleanup_candidates()
+            with database() as db:
+                for start in range(0, len(stale_urls), 500):
+                    batch = stale_urls[start:start + 500]
+                    placeholders = ",".join("?" for _ in batch)
+                    db.execute(
+                        f"DELETE FROM image_cache WHERE source_url IN ({placeholders})",
+                        batch,
+                    )
+
+            removed_files = 0
+            removed_bytes = 0
+            for path in candidates:
+                try:
+                    size = path.stat().st_size
+                    path.unlink()
+                except FileNotFoundError:
+                    continue
+                removed_files += 1
+                removed_bytes += size
+
+    return {
+        "removed_files": removed_files,
+        "removed_bytes": removed_bytes,
+        **temporary_file_cleanup_status(),
+    }
+
+
 def get_image_cache_errors(image_urls):
     image_urls = list(dict.fromkeys(url for url in image_urls if url))
     if not image_urls:
@@ -2500,6 +2581,12 @@ class LibraryHandler(SimpleHTTPRequestHandler):
         if parts.path == "/api/settings":
             self.send_json(get_sync_settings())
             return
+        if parts.path == "/api/maintenance/temporary-files":
+            try:
+                self.send_json(temporary_file_cleanup_status())
+            except OSError as exc:
+                self.send_json({"error": f"Impossibile leggere i file temporanei: {exc}"}, 500)
+            return
         if parts.path.startswith("/api/"):
             self.send_json({"error": "Endpoint non trovato."}, 404)
             return
@@ -2528,6 +2615,12 @@ class LibraryHandler(SimpleHTTPRequestHandler):
                     )
                 SETTINGS_CHANGED.set()
                 self.send_json(settings)
+                return
+            if parts.path == "/api/maintenance/temporary-files":
+                try:
+                    self.send_json(cleanup_temporary_files())
+                except OSError as exc:
+                    self.send_json({"error": f"Pulizia incompleta: {exc}"}, 500)
                 return
             if parts.path == "/api/games":
                 thread_url = normalize_thread_url(data.get("thread_url"))
