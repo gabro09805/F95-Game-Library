@@ -340,13 +340,15 @@ kbd { border: 1px solid #35363e; border-radius: 4px; padding: 2px 5px; color: #7
 .photo-viewer-close:hover, .photo-viewer-nav:hover:not(:disabled) { border-color: #b5a0ff; color: #d8caff; background: #332b43; }
 .photo-viewer-nav:disabled { opacity: .35; cursor: default; }
 .photo-viewer-close:focus-visible, .photo-viewer-nav:focus-visible { outline: 2px solid #c4b1ff; outline-offset: 2px; }
-.version-panel { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, .7fr); gap: 18px; align-items: end; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: #17181d; }
+.version-panel { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 12px; align-items: center; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: #17181d; }
 .version-panel label, .latest-version { display: grid; gap: 7px; color: #9e9da8; font-size: 10px; }
-.version-entry { display: flex; gap: 8px; }
+.version-entry { display: flex; min-width: 0; }
 .version-date { color: #858590; font-size: 9px; }
-.version-entry input { flex: 1; min-width: 0; padding: 9px 10px; border: 1px solid #35363e; border-radius: 6px; outline: 0; color: var(--text); background: #121317; font-size: 11px; }
+.version-entry input { width: 100%; min-width: 0; height: 36px; padding: 9px 10px; border: 1px solid #35363e; border-radius: 6px; outline: 0; color: var(--text); background: #121317; font-size: 11px; }
 .version-entry input:focus { border-color: #8c71bd; }
-.latest-version strong { min-height: 36px; display: flex; align-items: center; padding: 8px 10px; border-radius: 6px; color: #d8d5df; background: #202127; font-size: 12px; }
+.version-copy-button { flex: 0 0 auto; white-space: nowrap; }
+.latest-version { min-width: 0; }
+.latest-version strong { min-width: 0; min-height: 36px; display: flex; align-items: center; overflow-wrap: anywhere; padding: 8px 10px; border: 1px solid #35363e; border-radius: 6px; color: #d8d5df; background: #202127; font-size: 12px; }
 .detail-notes { min-height: 78px; }
 .personal-rating { display: flex; align-items: center; gap: 10px; margin-top: 12px; color: #aaa9b4; font-size: 11px; }
 .personal-stars { display: flex; gap: 2px; }
@@ -548,7 +550,11 @@ kbd { border: 1px solid #35363e; border-radius: 4px; padding: 2px 5px; color: #7
   .sync-report-game > img, .sync-report-cover-fallback { width: 72px; height: 54px; flex-basis: 72px; }
   .sync-report-game li strong { min-width: 88px; }
   .sync-summary-actions { padding: 10px 13px 13px; }
-  .version-panel { grid-template-columns: 1fr; }
+  .version-panel { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 6px; padding: 9px; }
+  .version-copy-button { min-height: 32px; padding: 0 6px; font-size: 9px; }
+  .version-panel label, .latest-version { gap: 6px; font-size: 9px; }
+  .version-entry input, .latest-version strong { height: 34px; min-height: 34px; padding: 7px 6px; font-size: 10px; }
+  .version-date { font-size: 8px; }
   .catalog-toolbar { flex-wrap: wrap; }
   .catalog-search-box { flex-basis: 100%; max-width: none; }
   .catalog-sort { flex: 1; }

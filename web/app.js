@@ -1178,10 +1178,10 @@ function renderDetail(game) {
       <section class="detail-section">
         <h3>VERSIONI</h3>
         <div class="version-panel">
-          <label>La mia versione<div class="version-entry">
+          <label class="version-current">La mia versione<div class="version-entry">
             <input id="user-version" value="${escapeHtml(game.user_version || "")}" maxlength="300" placeholder="Inserisci la versione che stai usando">
-            <button type="button" class="button button-quiet" id="copy-latest-version" ${game.latest_version ? "" : "disabled"}>Usa l'ultima</button>
           </div><small class="version-date">Data inserimento: ${escapeHtml(updateDate(game.user_version_updated_at))}</small></label>
+          <button type="button" class="button button-quiet version-copy-button" id="copy-latest-version" ${game.latest_version ? "" : "disabled"}>Usa l'ultima</button>
           <div class="latest-version"><span>Ultima versione su F95Zone</span><strong>${escapeHtml(game.latest_version || "Non rilevata")}</strong><small class="version-date">Data versione: ${escapeHtml(updateDate(game.thread_updated_at))}</small></div>
         </div>
       </section>
