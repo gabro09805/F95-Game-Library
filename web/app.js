@@ -1173,7 +1173,7 @@ function renderDetail(game) {
         <a class="button button-quiet" href="${escapeHtml(game.thread_url)}" target="_blank" rel="noopener noreferrer">Apri thread su F95Zone ↗</a>
         <button class="button button-quiet" id="edit-metadata">Modifica metadati</button>
         <div class="sync-control detail-sync-control">
-          <button class="icon-button" id="detail-sync" title="Controlla aggiornamenti">⟳</button>
+          <button class="icon-button" id="detail-sync" title="Controlla aggiornamenti" aria-label="Controlla aggiornamenti"><span class="sync-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg></span></button>
           <span class="sync-progress" id="detail-sync-progress" aria-live="polite">0/0</span>
         </div>
       </div>
