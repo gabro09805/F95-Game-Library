@@ -122,6 +122,23 @@ class MetadataParserTests(unittest.TestCase):
             "2026-10-26T15:10:00+00:00",
         )
 
+    def test_banner_in_post_is_cover_and_site_logo_og_image_is_ignored(self):
+        post = app.HtmlNode("div", {}, None)
+        image = app.HtmlNode("img", {
+            "class": "bbImage",
+            "src": "https://attachments.f95zone.to/2024/06/3793594_new-banner2.png",
+        }, post)
+        post.children.append(image)
+        self.assertEqual(
+            app.first_image_url(post, "https://f95zone.to/assets/images/logo-sqw192.png"),
+            "https://attachments.f95zone.to/2024/06/3793594_new-banner2.png",
+        )
+        self.assertEqual(app.first_post_image_urls(post), [])
+        self.assertEqual(
+            app.first_image_url(None, "https://f95zone.to/assets/images/logo-sqw192.png"),
+            "",
+        )
+
     def test_extracts_thread_page_title_tags_and_first_post_metadata(self):
         html = """
         <html><head>
@@ -358,6 +375,7 @@ class ValidationTests(unittest.TestCase):
         with (
             patch.object(app, "curl_fetch", return_value=fetched),
             patch.object(app, "load_f95_cookie_jar"),
+            patch.object(app, "read_setting", return_value=None),
         ):
             content, content_type = app.fetch_f95_image(
                 "https://attachments.f95zone.to/data/large.gif"

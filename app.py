@@ -62,6 +62,7 @@ CURL_SESSION = None
 CURL_SESSION_LOCK = threading.Lock()
 CURL_REQUEST_LOCK = threading.RLock()
 FLARESOLVERR_TIMEOUT = 60
+IMAGE_TIMEOUT = 120
 
 
 class CloudflareChallengeError(ValueError):
@@ -470,13 +471,15 @@ def image_candidates_from_img(image):
 
 
 def first_image_url(post_body, og_image):
-    images = first_post_image_urls(post_body)
-    if images:
-        return images[0]
-    return upgrade_f95_image_url(og_image)
+    for image_url in first_post_image_urls(post_body, include_banners=True):
+        return image_url
+    cover = upgrade_f95_image_url(og_image)
+    if cover and "/assets/" not in urlsplit(cover).path:
+        return cover
+    return ""
 
 
-def first_post_image_urls(post_body):
+def first_post_image_urls(post_body, include_banners=False):
     images = []
     seen = set()
     for candidate in image_candidates(post_body):
@@ -486,7 +489,7 @@ def first_post_image_urls(post_body):
         parsed = urlsplit(image_url)
         if parsed.scheme != "https" or not is_allowed_image_host(parsed.hostname):
             continue
-        if re.search(r"(?:banner|_logo|title[-_]?card)", image_url, re.I):
+        if not include_banners and re.search(r"(?:banner|_logo|title[-_]?card)", image_url, re.I):
             continue
         identity = image_url_identity(image_url)
         if identity in seen:
@@ -1511,7 +1514,7 @@ def is_cloudflare_challenge(status, headers, content):
     return False
 
 
-def curl_fetch(url, data, headers, cookie_jar, is_allowed, max_bytes, redirect_error, size_error):
+def curl_fetch(url, data, headers, cookie_jar, is_allowed, max_bytes, redirect_error, size_error, timeout=30):
     # Sessione unica riutilizzata (connessioni TLS e fingerprint); il jar cookie viene scambiato a ogni richiesta.
     session = get_curl_session()
     with CURL_REQUEST_LOCK:
@@ -1523,7 +1526,7 @@ def curl_fetch(url, data, headers, cookie_jar, is_allowed, max_bytes, redirect_e
                 url,
                 data=data,
                 headers=headers,
-                timeout=20,
+                timeout=timeout,
                 allow_redirects=False,
                 stream=True,
             )
@@ -1580,21 +1583,37 @@ def fetch_f95_image(image_url):
     }
     with F95_LOCK:
         cookie_jar = load_f95_cookie_jar()
-        try:
-            status, _, response_headers, content = curl_fetch(
-                image_url,
-                None,
-                headers,
-                cookie_jar,
-                lambda target: target.scheme == "https" and is_allowed_image_host(target.hostname),
-                MAX_IMAGE_BYTES,
-                "Redirect immagine F95Zone non consentito.",
-                "L'immagine F95Zone è vuota o supera il limite consentito.",
-            )
-        except curl_requests.exceptions.Timeout as exc:
-            raise ValueError("Impossibile raggiungere il CDN immagini F95Zone: timeout.") from exc
-        except curl_requests.exceptions.RequestException as exc:
-            raise ValueError(f"Impossibile raggiungere il CDN immagini F95Zone: {exc}.") from exc
+        saved_user_agent = read_setting("f95_user_agent")
+        if saved_user_agent:
+            headers["User-Agent"] = saved_user_agent
+        for attempt in range(2):
+            try:
+                status, _, response_headers, content = curl_fetch(
+                    image_url,
+                    None,
+                    headers,
+                    cookie_jar,
+                    lambda target: target.scheme == "https" and is_allowed_image_host(target.hostname),
+                    MAX_IMAGE_BYTES,
+                    "Redirect immagine F95Zone non consentito.",
+                    "L'immagine F95Zone è vuota o supera il limite consentito.",
+                    timeout=IMAGE_TIMEOUT,
+                )
+                break
+            except CloudflareChallengeError:
+                if attempt:
+                    raise
+                headers["User-Agent"] = solve_cloudflare_challenge("https://f95zone.to/", cookie_jar)
+                with database() as db:
+                    db.execute(
+                        "INSERT OR REPLACE INTO settings (key, value) VALUES ('f95_cookies', ?)",
+                        (serialize_cookie_jar(cookie_jar),),
+                    )
+                secure_database_permissions()
+            except curl_requests.exceptions.Timeout as exc:
+                raise ValueError("Impossibile raggiungere il CDN immagini F95Zone: timeout.") from exc
+            except curl_requests.exceptions.RequestException as exc:
+                raise ValueError(f"Impossibile raggiungere il CDN immagini F95Zone: {exc}.") from exc
     if status >= 400:
         raise ValueError(f"Impossibile caricare l'immagine F95Zone (HTTP {status}).")
     content_type = (response_headers.get("Content-Type") or "").split(";")[0].strip().lower()
