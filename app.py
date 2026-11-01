@@ -641,10 +641,9 @@ def catalog_metric(value, maximum):
 
 
 def fetch_catalog_stats(title, thread_url):
-    thread_match = re.search(r"/threads/[^/?#]*\.(\d+)", urlsplit(thread_url).path, re.I)
-    if not thread_match:
+    thread_id = thread_id_from_url(thread_url)
+    if thread_id is None:
         raise ValueError("Non riesco a ricavare l'ID del thread per leggere le statistiche del catalogo.")
-    thread_id = int(thread_match.group(1))
     query = urlencode({
         "cmd": "list",
         "cat": "games",

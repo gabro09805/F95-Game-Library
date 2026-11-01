@@ -285,6 +285,15 @@ class MetadataParserTests(unittest.TestCase):
                 app.fetch_catalog_stats("Example Game", "https://f95zone.to/threads/example.456/")
             )
 
+    def test_catalog_stats_accepts_thread_url_without_slug(self):
+        response = json.dumps({
+            "status": "ok",
+            "msg": {"data": [{"thread_id": 56872, "rating": 4.5, "likes": 1, "views": 2}]},
+        }).encode()
+        with patch.object(app, "f95_request", return_value=(response, None)):
+            stats = app.fetch_catalog_stats("Example Game", "https://f95zone.to/threads/56872/")
+        self.assertIsNotNone(stats)
+
     def test_overview_stops_at_thread_metadata_and_known_sections(self):
         text = (
             "Overview:\nAn overview with two paragraphs.\nSecond paragraph.\n"
