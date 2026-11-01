@@ -5,6 +5,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     DATA_DIR=/data
 
 WORKDIR /app
+COPY requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py ./app.py
 COPY web ./web
 RUN mkdir -p /data && chown -R nobody:nogroup /app /data

@@ -3,9 +3,11 @@ from email.message import Message
 import threading
 import tempfile
 import unittest
-from http.cookiejar import Cookie
+from http.cookiejar import CookieJar, Cookie
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.request import urlopen
+from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 from unittest.mock import Mock, patch
 
 import app
@@ -338,29 +340,14 @@ class ValidationTests(unittest.TestCase):
 
     def test_image_proxy_accepts_images_larger_than_12_mib_up_to_50_mib(self):
         image_bytes = b"x" * (13 * 1024 * 1024)
-        headers = Message()
-        headers["Content-Type"] = "image/gif"
-
-        class FakeResponse:
-            def __init__(self):
-                self.headers = headers
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return None
-
-            def geturl(self):
-                return "https://attachments.f95zone.to/data/large.gif"
-
-            def read(self, limit):
-                return image_bytes[:limit]
-
-        opener = Mock()
-        opener.open.return_value = FakeResponse()
+        fetched = (
+            200,
+            urlsplit("https://attachments.f95zone.to/data/large.gif"),
+            {"Content-Type": "image/gif"},
+            image_bytes,
+        )
         with (
-            patch.object(app, "build_opener", return_value=opener),
+            patch.object(app, "curl_fetch", return_value=fetched),
             patch.object(app, "load_f95_cookie_jar"),
         ):
             content, content_type = app.fetch_f95_image(
@@ -369,6 +356,112 @@ class ValidationTests(unittest.TestCase):
 
         self.assertEqual(len(content), 13 * 1024 * 1024)
         self.assertEqual(content_type, "image/gif")
+
+
+class CurlSessionTests(unittest.TestCase):
+    def setUp(self):
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                if self.path == "/login":
+                    self.send_response(302)
+                    self.send_header("Set-Cookie", "xf_user=abc; Path=/")
+                    self.send_header("Location", "/home")
+                    self.end_headers()
+                    return
+                if self.path == "/challenge":
+                    body = b"<html><title>Just a moment...</title></html>"
+                    self.send_response(403)
+                    self.send_header("cf-mitigated", "challenge")
+                elif self.path == "/forbidden":
+                    body = b"<html>Forbidden</html>"
+                    self.send_response(403)
+                else:
+                    body = self.headers.get("Cookie", "").encode()
+                    self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.server.server_port}"
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def fetch(self, path, jar):
+        return app.curl_fetch(self.base + path, None, {}, jar, lambda target: True, 1024, "redirect", "size")
+
+    def test_session_is_shared_and_cookies_are_kept(self):
+        jar = CookieJar()
+        first = app.get_curl_session()
+        self.fetch("/login", jar)
+        self.assertIn("xf_user", [cookie.name for cookie in jar])
+        _, _, _, body = self.fetch("/page", jar)
+        self.assertIn(b"xf_user=abc", body)
+        self.assertIs(app.get_curl_session(), first)
+
+    def test_challenge_is_distinguished_from_plain_forbidden(self):
+        with self.assertRaisesRegex(ValueError, "challenge Cloudflare"):
+            self.fetch("/challenge", CookieJar())
+        status, _, _, _ = self.fetch("/forbidden", CookieJar())
+        self.assertEqual(status, 403)
+
+
+    def test_challenge_is_solved_through_flaresolverr_and_retried(self):
+        jar = CookieJar()
+        calls = []
+
+        def fake_curl_fetch(url, data, headers, cookie_jar, *args):
+            calls.append(headers.get("User-Agent"))
+            if len(calls) == 1:
+                raise app.CloudflareChallengeError("challenge")
+            return 200, urlsplit(url), {}, b"ok"
+
+        solver_response = json.dumps({
+            "status": "ok",
+            "solution": {
+                "userAgent": "SolverUA/1.0",
+                "cookies": [{"name": "cf_clearance", "value": "xyz", "domain": ".f95zone.to", "path": "/", "expires": -1}],
+            },
+        }).encode()
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read(self, limit):
+                return solver_response
+
+        with (
+            patch.dict("os.environ", {"FLARESOLVERR_URL": "http://solver:8191/v1"}),
+            patch.object(app, "curl_fetch", side_effect=fake_curl_fetch),
+            patch.object(app, "urlopen", return_value=FakeResponse()),
+            patch.object(app, "read_setting", return_value=None),
+            patch.object(app, "database"),
+        ):
+            content, _ = app.perform_f95_request("https://f95zone.to/threads/a.1/", None, None, jar)
+
+        self.assertEqual(content, b"ok")
+        self.assertEqual(calls, [None, "SolverUA/1.0"])
+        self.assertIn("cf_clearance", [cookie.name for cookie in jar])
+
+    def test_challenge_without_solver_reports_configuration_hint(self):
+        with (
+            patch.dict("os.environ", {"FLARESOLVERR_URL": ""}),
+            patch.object(app, "curl_fetch", side_effect=app.CloudflareChallengeError("challenge")),
+            patch.object(app, "read_setting", return_value=None),
+        ):
+            with self.assertRaisesRegex(ValueError, "FLARESOLVERR_URL"):
+                app.perform_f95_request("https://f95zone.to/threads/a.1/", None, None, CookieJar())
 
 
 class GameListingTests(unittest.TestCase):
@@ -1214,7 +1307,7 @@ class TemporaryFileCleanupTests(unittest.TestCase):
             before = json.loads(response.read())
         self.assertEqual(before, {"files": 3, "bytes": len(b"orphan") + len(b"untracked") + len(b"temporary")})
 
-        request = app.Request(
+        request = Request(
             base_url,
             data=b"{}",
             headers={"Content-Type": "application/json"},

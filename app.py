@@ -13,10 +13,12 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.error import HTTPError, URLError
+from urllib.error import URLError
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit
 from urllib.parse import urljoin
-from urllib.request import HTTPCookieProcessor, HTTPRedirectHandler, Request, build_opener
+from urllib.request import Request, urlopen
+
+from curl_cffi import requests as curl_requests
 
 
 ROOT = Path(__file__).resolve().parent
@@ -54,6 +56,16 @@ SYNC_PROGRESS = {
 CATALOG_FILTER_CACHE = {"expires_at": 0, "options": None}
 CATALOG_FILTER_LOCK = threading.Lock()
 F95_LOCK = threading.Lock()
+IMPERSONATE_BROWSER = "chrome"
+MAX_REDIRECTS = 10
+CURL_SESSION = None
+CURL_SESSION_LOCK = threading.Lock()
+CURL_REQUEST_LOCK = threading.RLock()
+FLARESOLVERR_TIMEOUT = 60
+
+
+class CloudflareChallengeError(ValueError):
+    pass
 DEV_VERSION_LOCK = threading.Lock()
 DEV_VERSION_SNAPSHOT = None
 DEV_VERSION_HASH = ""
@@ -96,22 +108,6 @@ def title_from_thread_url(thread_url):
     slug = re.sub(r"\.\d+$", "", slug)
     title = re.sub(r"[-_]+", " ", slug).strip()
     return title[:300] or "Gioco F95Zone"
-
-
-class SafeRedirectHandler(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        parsed = urlsplit(newurl)
-        if parsed.scheme != "https" or parsed.hostname not in ALLOWED_HOSTS:
-            raise HTTPError(newurl, code, "Redirect F95Zone non consentito", headers, fp)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-
-class SafeImageRedirectHandler(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        parsed = urlsplit(newurl)
-        if parsed.scheme != "https" or not is_allowed_image_host(parsed.hostname):
-            raise HTTPError(newurl, code, "Redirect immagine non consentito", headers, fp)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 class ThreadMetadataParser(HTMLParser):
@@ -1407,33 +1403,154 @@ def load_f95_cookie_jar():
     return deserialize_cookie_jar(read_setting("f95_cookies"))
 
 
+def solve_cloudflare_challenge(url, cookie_jar):
+    solver_url = os.environ.get("FLARESOLVERR_URL", "").strip()
+    if not solver_url:
+        raise CloudflareChallengeError(
+            "F95Zone ha risposto con una challenge Cloudflare. Configura FLARESOLVERR_URL per risolverla automaticamente."
+        )
+    if urlsplit(solver_url).scheme not in ("http", "https"):
+        raise ValueError("FLARESOLVERR_URL non è valido.")
+    payload = json.dumps({
+        "cmd": "request.get",
+        "url": url,
+        "maxTimeout": FLARESOLVERR_TIMEOUT * 1000,
+        "cookies": [
+            {"name": cookie.name, "value": cookie.value, "domain": cookie.domain, "path": cookie.path}
+            for cookie in cookie_jar
+            if cookie.domain.lstrip(".").lower() in ALLOWED_HOSTS
+        ],
+    }).encode("utf-8")
+    request = Request(solver_url, data=payload, headers={"Content-Type": "application/json"})
+    try:
+        with urlopen(request, timeout=FLARESOLVERR_TIMEOUT + 15) as response:
+            result = json.loads(response.read(MAX_PAGE_BYTES * 4))
+    except (URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        raise ValueError(f"FlareSolverr non raggiungibile o risposta non valida: {exc}.") from exc
+    solution = result.get("solution") if isinstance(result, dict) else None
+    if not isinstance(solution, dict) or result.get("status") != "ok":
+        message = result.get("message") if isinstance(result, dict) else ""
+        raise CloudflareChallengeError(f"FlareSolverr non è riuscito a risolvere la challenge Cloudflare: {message}".strip())
+    imported = 0
+    for item in solution.get("cookies") or []:
+        domain = str(item.get("domain") or "")
+        if not item.get("name") or domain.lstrip(".").lower() not in ALLOWED_HOSTS:
+            continue
+        expires = item.get("expires")
+        cookie_jar.set_cookie(Cookie(
+            version=0, name=item["name"], value=item.get("value") or "", port=None,
+            port_specified=False, domain=domain, domain_specified=True,
+            domain_initial_dot=domain.startswith("."), path=item.get("path") or "/",
+            path_specified=True, secure=bool(item.get("secure", True)),
+            expires=int(expires) if isinstance(expires, (int, float)) and expires > 0 else None,
+            discard=False, comment=None, comment_url=None, rest={}, rfc2109=False,
+        ))
+        imported += 1
+    user_agent = solution.get("userAgent")
+    if not imported or not isinstance(user_agent, str) or not user_agent:
+        raise CloudflareChallengeError("FlareSolverr non ha restituito cookie o User-Agent utilizzabili.")
+    with database() as db:
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('f95_user_agent', ?)", (user_agent[:500],))
+    return user_agent
+
+
 def perform_f95_request(url, data, headers, cookie_jar):
     parsed = urlsplit(url)
     if parsed.scheme != "https" or parsed.hostname not in ALLOWED_HOSTS:
         raise ValueError("Richiesta verso un host F95Zone non consentito.")
-    request_headers = {
-        "User-Agent": "F95Library/0.1 (+self-hosted personal library)",
-        "Accept": "text/html,application/xhtml+xml",
-    }
+    request_headers = {"Accept": "text/html,application/xhtml+xml"}
+    saved_user_agent = read_setting("f95_user_agent")
+    if saved_user_agent:
+        request_headers["User-Agent"] = saved_user_agent
     if headers:
         request_headers.update(headers)
-    request = Request(url, data=data, headers=request_headers)
-    opener = build_opener(SafeRedirectHandler(), HTTPCookieProcessor(cookie_jar))
-    try:
-        with opener.open(request, timeout=20) as response:
-            final_url = urlsplit(response.geturl())
-            content = response.read(MAX_PAGE_BYTES + 1)
-            if len(content) > MAX_PAGE_BYTES:
-                raise ValueError("La pagina F95Zone supera il limite di dimensione consentito.")
-            if final_url.hostname not in ALLOWED_HOSTS:
-                raise ValueError("F95Zone ha reindirizzato a un host non consentito.")
-            return content, final_url
-    except HTTPError as exc:
-        if exc.code in (401, 403):
-            raise ValueError("F95Zone ha negato l'accesso. Il thread potrebbe richiedere una sessione valida.") from exc
-        raise ValueError(f"F95Zone ha restituito HTTP {exc.code}.") from exc
-    except (URLError, TimeoutError) as exc:
-        raise ValueError(f"Impossibile raggiungere F95Zone: {exc.reason if isinstance(exc, URLError) else 'timeout'}.") from exc
+    for attempt in range(2):
+        try:
+            status, final_url, _, content = curl_fetch(
+                url,
+                data,
+                request_headers,
+                cookie_jar,
+                lambda target: target.scheme == "https" and target.hostname in ALLOWED_HOSTS,
+                MAX_PAGE_BYTES,
+                "Redirect F95Zone non consentito.",
+                "La pagina F95Zone supera il limite di dimensione consentito.",
+            )
+            break
+        except CloudflareChallengeError:
+            if attempt:
+                raise
+            # Dopo il login il POST non viene rieseguito dal solver: serve solo il cookie di clearance.
+            request_headers["User-Agent"] = solve_cloudflare_challenge(
+                f"{parsed.scheme}://{parsed.hostname}/", cookie_jar
+            )
+        except curl_requests.exceptions.Timeout as exc:
+            raise ValueError("Impossibile raggiungere F95Zone: timeout.") from exc
+        except curl_requests.exceptions.RequestException as exc:
+            raise ValueError(f"Impossibile raggiungere F95Zone: {exc}.") from exc
+    if status in (401, 403):
+        raise ValueError("F95Zone ha negato l'accesso. Il thread potrebbe richiedere una sessione valida.")
+    if status >= 400:
+        raise ValueError(f"F95Zone ha restituito HTTP {status}.")
+    return content, final_url
+
+
+def get_curl_session():
+    global CURL_SESSION
+    with CURL_SESSION_LOCK:
+        if CURL_SESSION is None:
+            CURL_SESSION = curl_requests.Session(impersonate=IMPERSONATE_BROWSER)
+        return CURL_SESSION
+
+
+def is_cloudflare_challenge(status, headers, content):
+    if (headers.get("cf-mitigated") or "").lower() == "challenge":
+        return True
+    if status in (403, 429, 503) or "text/html" in (headers.get("Content-Type") or ""):
+        head = content[:4096].lower()
+        return b"just a moment..." in head or b"cf-challenge" in head or b"/cdn-cgi/challenge-platform" in content[:65536].lower()
+    return False
+
+
+def curl_fetch(url, data, headers, cookie_jar, is_allowed, max_bytes, redirect_error, size_error):
+    # Sessione unica riutilizzata (connessioni TLS e fingerprint); il jar cookie viene scambiato a ogni richiesta.
+    session = get_curl_session()
+    with CURL_REQUEST_LOCK:
+        session.cookies.jar = cookie_jar
+        method = "POST" if data is not None else "GET"
+        for _ in range(MAX_REDIRECTS + 1):
+            response = session.request(
+                method,
+                url,
+                data=data,
+                headers=headers,
+                timeout=20,
+                allow_redirects=False,
+                stream=True,
+            )
+            try:
+                location = response.headers.get("Location")
+                if response.status_code in (301, 302, 303, 307, 308) and location:
+                    url = urljoin(url, location)
+                    if not is_allowed(urlsplit(url)):
+                        raise ValueError(redirect_error)
+                    if response.status_code not in (307, 308):
+                        method, data = "GET", None
+                    continue
+                content = bytearray()
+                for chunk in response.iter_content():
+                    content.extend(chunk)
+                    if len(content) > max_bytes:
+                        raise ValueError(size_error)
+                if is_cloudflare_challenge(response.status_code, response.headers, bytes(content)):
+                    raise CloudflareChallengeError(
+                        "F95Zone ha risposto con una challenge Cloudflare invece della pagina richiesta "
+                        f"(HTTP {response.status_code}); la sessione non è stata accettata."
+                    )
+                return response.status_code, urlsplit(url), response.headers, bytes(content)
+            finally:
+                response.close()
+    raise ValueError(redirect_error)
 
 
 def f95_request(url, data=None, headers=None, cookie_jar=None):
@@ -1444,6 +1561,13 @@ def f95_request(url, data=None, headers=None, cookie_jar=None):
         result = perform_f95_request(url, data, headers, active_cookie_jar)
         if has_auth_cookie(active_cookie_jar):
             save_f95_session(active_cookie_jar, read_setting("f95_username") or "")
+        elif any(cookie.name == "cf_clearance" for cookie in active_cookie_jar):
+            with database() as db:
+                db.execute(
+                    "INSERT OR REPLACE INTO settings (key, value) VALUES ('f95_cookies', ?)",
+                    (serialize_cookie_jar(active_cookie_jar),),
+                )
+            secure_database_permissions()
         return result
 
 
@@ -1451,37 +1575,35 @@ def fetch_f95_image(image_url):
     parsed = urlsplit(image_url)
     if parsed.scheme != "https" or not is_allowed_image_host(parsed.hostname):
         raise ValueError("Host immagine non consentito.")
-    request = Request(
-        image_url,
-        headers={
-            "User-Agent": "Mozilla/5.0 (compatible; F95Library/0.1)",
-            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-            "Referer": "https://f95zone.to/",
-        },
-    )
+    headers = {
+        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        "Referer": "https://f95zone.to/",
+    }
     with F95_LOCK:
         cookie_jar = load_f95_cookie_jar()
-        opener = build_opener(
-            SafeImageRedirectHandler(),
-            HTTPCookieProcessor(cookie_jar),
-        )
         try:
-            with opener.open(request, timeout=20) as response:
-                final = urlsplit(response.geturl())
-                if final.scheme != "https" or not is_allowed_image_host(final.hostname):
-                    raise ValueError("Redirect immagine F95Zone non consentito.")
-                content_type = response.headers.get_content_type()
-                if not content_type.startswith("image/"):
-                    raise ValueError("F95Zone non ha restituito un'immagine.")
-                content = response.read(MAX_IMAGE_BYTES + 1)
-                if not content or len(content) > MAX_IMAGE_BYTES:
-                    raise ValueError("L'immagine F95Zone è vuota o supera il limite consentito.")
-                return content, content_type
-        except HTTPError as exc:
-            raise ValueError(f"Impossibile caricare l'immagine F95Zone (HTTP {exc.code}).") from exc
-        except (URLError, TimeoutError) as exc:
-            reason = exc.reason if isinstance(exc, URLError) else "timeout"
-            raise ValueError(f"Impossibile raggiungere il CDN immagini F95Zone: {reason}.") from exc
+            status, _, response_headers, content = curl_fetch(
+                image_url,
+                None,
+                headers,
+                cookie_jar,
+                lambda target: target.scheme == "https" and is_allowed_image_host(target.hostname),
+                MAX_IMAGE_BYTES,
+                "Redirect immagine F95Zone non consentito.",
+                "L'immagine F95Zone è vuota o supera il limite consentito.",
+            )
+        except curl_requests.exceptions.Timeout as exc:
+            raise ValueError("Impossibile raggiungere il CDN immagini F95Zone: timeout.") from exc
+        except curl_requests.exceptions.RequestException as exc:
+            raise ValueError(f"Impossibile raggiungere il CDN immagini F95Zone: {exc}.") from exc
+    if status >= 400:
+        raise ValueError(f"Impossibile caricare l'immagine F95Zone (HTTP {status}).")
+    content_type = (response_headers.get("Content-Type") or "").split(";")[0].strip().lower()
+    if not content_type.startswith("image/"):
+        raise ValueError("F95Zone non ha restituito un'immagine.")
+    if not content:
+        raise ValueError("L'immagine F95Zone è vuota o supera il limite consentito.")
+    return content, content_type
 
 
 def image_cache_directory():
