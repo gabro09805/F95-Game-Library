@@ -481,6 +481,25 @@ class CurlSessionTests(unittest.TestCase):
         self.assertEqual(calls, [None, "SolverUA/1.0"])
         self.assertIn("cf_clearance", [cookie.name for cookie in jar])
 
+    def test_persistent_challenge_falls_back_to_solver_response_body(self):
+        solution = {
+            "userAgent": "SolverUA/1.0",
+            "url": "https://f95zone.to/sam/latest_alpha/latest_data.php?cmd=list",
+            "status": 200,
+            "response": '<html><head></head><body><pre style="word-wrap: break-word;">{&quot;status&quot;: &quot;ok&quot;}</pre></body></html>',
+        }
+        with (
+            patch.object(app, "curl_fetch", side_effect=app.CloudflareChallengeError("challenge")),
+            patch.object(app, "solve_cloudflare_challenge", return_value=solution) as solver,
+            patch.object(app, "read_setting", return_value=None),
+        ):
+            content, final_url = app.perform_f95_request(
+                "https://f95zone.to/sam/latest_alpha/latest_data.php?cmd=list", None, None, CookieJar()
+            )
+        self.assertEqual(content, b'{"status": "ok"}')
+        self.assertEqual(final_url.path, "/sam/latest_alpha/latest_data.php")
+        self.assertEqual(solver.call_count, 2)
+
     def test_challenge_without_solver_reports_configuration_hint(self):
         with (
             patch.dict("os.environ", {"FLARESOLVERR_URL": ""}),

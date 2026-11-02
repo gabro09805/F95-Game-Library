@@ -1449,11 +1449,22 @@ def solve_cloudflare_challenge(url, cookie_jar):
         ))
         imported += 1
     user_agent = solution.get("userAgent")
-    if not imported or not isinstance(user_agent, str) or not user_agent:
-        raise CloudflareChallengeError("FlareSolverr non ha restituito cookie o User-Agent utilizzabili.")
+    if not isinstance(user_agent, str) or not user_agent:
+        raise CloudflareChallengeError("FlareSolverr non ha restituito un User-Agent utilizzabile.")
     with database() as db:
         db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('f95_user_agent', ?)", (user_agent[:500],))
-    return user_agent
+    return solution
+
+
+def solver_response_body(solution):
+    body = solution.get("response")
+    if not isinstance(body, str):
+        return b""
+    # Chrome mostra i JSON dentro <pre>: lo estraggo per restituire il payload originale.
+    wrapped = re.fullmatch(r"\s*<html[^>]*>.*?<pre[^>]*>(.*?)</pre>.*?</html>\s*", body, re.S | re.I)
+    if wrapped and not re.search(r"<(?:div|form|script)\b", body[:2000], re.I):
+        body = html.unescape(wrapped.group(1))
+    return body.encode("utf-8")
 
 
 def perform_f95_request(url, data, headers, cookie_jar):
@@ -1466,6 +1477,7 @@ def perform_f95_request(url, data, headers, cookie_jar):
         request_headers["User-Agent"] = saved_user_agent
     if headers:
         request_headers.update(headers)
+    solved_url = url if data is None else f"{parsed.scheme}://{parsed.hostname}/"
     for attempt in range(2):
         try:
             status, final_url, _, content = curl_fetch(
@@ -1481,11 +1493,19 @@ def perform_f95_request(url, data, headers, cookie_jar):
             break
         except CloudflareChallengeError:
             if attempt:
-                raise
+                if data is not None:
+                    raise
+                # I cookie di clearance non sono accettati da curl_cffi: uso direttamente la risposta del solver.
+                solution = solve_cloudflare_challenge(url, cookie_jar)
+                content = solver_response_body(solution)
+                final_url = urlsplit(str(solution.get("url") or url))
+                status = int(solution.get("status") or 200)
+                if final_url.hostname not in ALLOWED_HOSTS or len(content) > MAX_PAGE_BYTES:
+                    raise
+                break
             # Dopo il login il POST non viene rieseguito dal solver: serve solo il cookie di clearance.
-            request_headers["User-Agent"] = solve_cloudflare_challenge(
-                f"{parsed.scheme}://{parsed.hostname}/", cookie_jar
-            )
+            solution = solve_cloudflare_challenge(solved_url, cookie_jar)
+            request_headers["User-Agent"] = solution["userAgent"]
         except curl_requests.exceptions.Timeout as exc:
             raise ValueError("Impossibile raggiungere F95Zone: timeout.") from exc
         except curl_requests.exceptions.RequestException as exc:
@@ -1603,7 +1623,7 @@ def fetch_f95_image(image_url):
             except CloudflareChallengeError:
                 if attempt:
                     raise
-                headers["User-Agent"] = solve_cloudflare_challenge("https://f95zone.to/", cookie_jar)
+                headers["User-Agent"] = solve_cloudflare_challenge("https://f95zone.to/", cookie_jar)["userAgent"]
                 with database() as db:
                     db.execute(
                         "INSERT OR REPLACE INTO settings (key, value) VALUES ('f95_cookies', ?)",
