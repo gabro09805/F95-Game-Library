@@ -10,6 +10,9 @@ const catalogDateLimits = [0, 365, 180, 90, 30, 14, 7, 3, 1];
 const LIBRARY_SORT_STORAGE_KEY = "f95-library-sort";
 const LIBRARY_SORT_FIELDS = ["name", "updated", "added", "rating", "likes", "views"];
 const SYNC_REPORT_CURSOR_KEY = "f95-library-sync-report-cursor";
+const GIF_PLAYBACK_STORAGE_KEY = "f95-library-gif-playback";
+const GIF_PLAYBACK_MODES = ["auto", "click", "never"];
+let gifPlaybackPreference = "auto";
 
 function catalogDateLabel(days) {
   if (!days) return "SEMPRE";
@@ -125,6 +128,22 @@ async function api(path, options = {}) {
   return payload;
 }
 
+async function downloadDataFile(path) {
+  const response = await fetch(path);
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.error || `Errore HTTP ${response.status}`);
+  }
+  const url = URL.createObjectURL(await response.blob());
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = response.headers.get("Content-Disposition")?.match(/filename="([^"]+)"/)?.[1] || "download";
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 function showNotice(message, error = false, type = "message") {
   clearTimeout(syncNoticeTimeout);
   syncNoticeTimeout = undefined;
@@ -138,6 +157,153 @@ function showNotice(message, error = false, type = "message") {
     }, 5000);
   }
 }
+
+function isGifSource(source) {
+  try {
+    const url = new URL(source, window.location.href);
+    const original = url.pathname === "/api/image"
+      ? new URL(url.searchParams.get("url") || "")
+      : url;
+    return original.pathname.toLowerCase().endsWith(".gif");
+  } catch {
+    return false;
+  }
+}
+
+function restoreGifAccessibility(image, clear = false) {
+  for (const [attribute, key] of [
+    ["role", "gifPreviousRole"],
+    ["tabindex", "gifPreviousTabindex"],
+    ["aria-label", "gifPreviousAriaLabel"],
+    ["title", "gifPreviousTitle"],
+  ]) {
+    const value = image.dataset[key];
+    if (value === "") image.removeAttribute(attribute);
+    else if (value !== undefined) image.setAttribute(attribute, value);
+    if (clear) delete image.dataset[key];
+  }
+  if (clear) delete image.dataset.gifAccessibilitySaved;
+}
+
+function captureGifFrame(image) {
+  if (image.dataset.gifFrozen === "true" || !image.naturalWidth || !image.naturalHeight) return;
+  try {
+    const scale = Math.min(1, 2048 / Math.max(image.naturalWidth, image.naturalHeight));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Il browser non può creare un'immagine statica.");
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    image.dataset.gifStaticSource = canvas.toDataURL("image/png");
+    image.dataset.gifFrozen = "true";
+    image.dataset.gifState = "paused";
+    image.src = image.dataset.gifStaticSource;
+  } catch (error) {
+    image.dataset.gifFreezeFailed = "true";
+    showNotice(`Impossibile fermare questa GIF: ${error.message}`, true);
+  }
+}
+
+function configureGifImage(image, preference = gifPlaybackPreference) {
+  const source = image.dataset.gifOriginalSource || image.getAttribute("src") || "";
+  if (!isGifSource(source)) return;
+  image.dataset.gifOriginalSource = source;
+
+  if (preference === "auto") {
+    restoreGifAccessibility(image, true);
+    for (const key of ["gifPreference", "gifState", "gifStaticSource", "gifFrozen", "gifWaiting", "gifFreezeFailed", "gifOriginalSource"]) {
+      delete image.dataset[key];
+    }
+    image.classList.remove("gif-playback-click");
+    if (image.getAttribute("src") !== source) image.src = source;
+    return;
+  }
+
+  if (image.dataset.gifAccessibilitySaved !== "true") {
+    image.dataset.gifAccessibilitySaved = "true";
+    image.dataset.gifPreviousRole = image.getAttribute("role") || "";
+    image.dataset.gifPreviousTabindex = image.getAttribute("tabindex") || "";
+    image.dataset.gifPreviousAriaLabel = image.getAttribute("aria-label") || "";
+    image.dataset.gifPreviousTitle = image.getAttribute("title") || "";
+  }
+  image.dataset.gifPreference = preference;
+  image.classList.toggle("gif-playback-click", preference === "click");
+  if (preference === "click") {
+    image.setAttribute("role", "button");
+    image.tabIndex = 0;
+    image.setAttribute("aria-label", `${image.alt || "GIF"}. Premi per riprodurla.`);
+    image.title = "Premi per riprodurre la GIF";
+  } else {
+    restoreGifAccessibility(image);
+    image.title = "Riproduzione GIF disattivata";
+  }
+
+  if (image.dataset.gifStaticSource) {
+    image.dataset.gifFrozen = "true";
+    image.dataset.gifState = "paused";
+    if (image.getAttribute("src") !== image.dataset.gifStaticSource) {
+      image.src = image.dataset.gifStaticSource;
+    }
+    return;
+  }
+  if (image.dataset.gifFreezeFailed === "true") return;
+  const freeze = () => {
+    delete image.dataset.gifWaiting;
+    if (["click", "never"].includes(image.dataset.gifPreference)) captureGifFrame(image);
+  };
+  if (image.complete && image.naturalWidth) {
+    freeze();
+  } else if (image.dataset.gifWaiting !== "true") {
+    image.dataset.gifWaiting = "true";
+    image.addEventListener("load", freeze, { once: true });
+  }
+}
+
+function setupGifPlayback(root) {
+  root.querySelectorAll("img").forEach((image) => configureGifImage(image));
+}
+
+function applyGifPlaybackPreference(preference, persist = false) {
+  if (!GIF_PLAYBACK_MODES.includes(preference)) {
+    throw new Error("Modalità di riproduzione GIF non valida.");
+  }
+  if (persist) localStorage.setItem(GIF_PLAYBACK_STORAGE_KEY, preference);
+  gifPlaybackPreference = preference;
+  document.querySelectorAll("img").forEach((image) => configureGifImage(image, preference));
+}
+
+function initializeGifPlayback() {
+  let preference = "auto";
+  try {
+    const saved = localStorage.getItem(GIF_PLAYBACK_STORAGE_KEY);
+    if (GIF_PLAYBACK_MODES.includes(saved)) preference = saved;
+  } catch {
+    preference = "auto";
+  }
+  gifPlaybackPreference = preference;
+  document.querySelector("#gif-playback-select").value = preference;
+}
+
+document.addEventListener("click", (event) => {
+  const image = event.target.closest?.('img[data-gif-preference="click"][data-gif-state="paused"]');
+  if (!image || image.dataset.gifFrozen !== "true") return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  image.dataset.gifState = "playing";
+  image.title = "GIF in riproduzione";
+  image.setAttribute("aria-label", `${image.alt || "GIF"}. In riproduzione.`);
+  image.src = image.dataset.gifOriginalSource;
+}, true);
+
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  const image = event.target.closest?.('img[data-gif-preference="click"][data-gif-state="paused"]');
+  if (!image || image.dataset.gifFrozen !== "true") return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  image.click();
+}, true);
 
 function hideNotice() {
   clearTimeout(syncNoticeTimeout);
@@ -409,7 +575,7 @@ function renderCatalog() {
           <div class="catalog-card-stats">
             <span class="catalog-rating">★ ${rating > 0 ? rating.toFixed(1) : "-"}</span>
             <span class="catalog-likes">♥ ${compactCount(game.likes)}</span>
-            <span>◉ ${compactCount(game.views)}</span>
+            <span class="catalog-views">◉ ${compactCount(game.views)}</span>
           </div>
           <small>${game.version ? `v${escapeHtml(game.version.replace(/^v(?=\d)/i, ""))} · ` : ""}${escapeHtml(updateDate(game.updated_at))}</small>
           ${game.in_library
@@ -418,6 +584,7 @@ function renderCatalog() {
         </div>
       </article>`;
   }).join("");
+  setupGifPlayback(gridElement);
   gridElement.querySelectorAll(".catalog-card").forEach((card) => {
     card.addEventListener("click", (event) => {
       if (event.target.closest("button")) return;
@@ -499,8 +666,11 @@ function setupPhotoViewer(root) {
 function renderPhotoViewer() {
   const image = photoViewerImages[photoViewerIndex];
   if (!image) return;
-  document.querySelector("#photo-viewer-image").src = imageSource(image.url);
-  document.querySelector("#photo-viewer-image").alt = image.alt;
+  const viewerImage = document.querySelector("#photo-viewer-image");
+  configureGifImage(viewerImage, "auto");
+  viewerImage.src = imageSource(image.url);
+  viewerImage.alt = image.alt;
+  configureGifImage(viewerImage);
   document.querySelector("#photo-viewer-caption").textContent =
     `${photoViewerIndex + 1} / ${photoViewerImages.length}`;
   document.querySelector("#photo-viewer-previous").disabled = photoViewerImages.length < 2;
@@ -574,7 +744,7 @@ async function openCatalogDetails(threadId) {
           <div class="thread-stats">
             <span class="thread-stat rating-stat">★ ${rating > 0 ? rating.toFixed(1) : "-"}</span>
             <span class="thread-stat like-stat">♥ ${compactCount(game.likes)} like</span>
-            <span class="thread-stat">◉ ${compactCount(game.views)} visualizzazioni</span>
+            <span class="thread-stat views-stat">◉ ${compactCount(game.views)} visualizzazioni</span>
           </div>
           <section class="detail-section"><h3>OVERVIEW</h3>
             <p class="detail-description">${escapeHtml(details.description || "Overview non disponibile nel primo post.")}</p>
@@ -595,6 +765,7 @@ async function openCatalogDetails(threadId) {
       </main>`;
     setupDetailTags(content);
     setupPhotoViewer(content);
+    setupGifPlayback(content);
     document.querySelector("#catalog-detail-back").addEventListener("click", () => detailModal.close());
     document.querySelector(".catalog-detail-add")?.addEventListener("click", async (event) => {
       const button = event.currentTarget;
@@ -1028,12 +1199,13 @@ function renderGames() {
           <div class="card-stats">
             <span class="card-rating" title="${escapeHtml(ratingTitle)}">${Number.isFinite(threadRating) && threadRating > 0 ? `★ ${threadRating.toFixed(1)}` : "★ -"}</span>
             <span title="Mi piace">♥ ${compactCount(game.likes)}</span>
-            <span title="Visualizzazioni">◉ ${compactCount(game.views)}</span>
+            <span class="card-views" title="Visualizzazioni">◉ ${compactCount(game.views)}</span>
           </div>
           <div class="card-footer"><span title="${escapeHtml(game.thread_updated_at || "")}">${escapeHtml(updateDate(game.thread_updated_at))}</span><span class="card-version">${displayedVersion ? `v${escapeHtml(displayedVersion)}` : "↗ F95Zone"}</span></div>
         </div>
       </article>`;
   }).join("");
+  setupGifPlayback(grid);
   grid.querySelectorAll(".game-card").forEach((card) => {
     card.addEventListener("click", (event) => {
       if (event.target.closest("[data-select-game]")) return;
@@ -1099,7 +1271,9 @@ function openAddModal() {
 async function openSettings() {
   document.querySelector("#auth-error").classList.add("hidden");
   document.querySelector("#settings-error").classList.add("hidden");
+  document.querySelector("#gif-settings-error").classList.add("hidden");
   document.querySelector("#temporary-files-error").classList.add("hidden");
+  document.querySelector("#gif-playback-select").value = gifPlaybackPreference;
   document.querySelector("#settings-login-form").reset();
   settingsModal.showModal();
   await Promise.all([refreshAuthStatus(), loadAppSettings(), loadTemporaryFilesStatus()]);
@@ -1194,7 +1368,7 @@ function renderDetail(game) {
       <div class="thread-stats">
         <span class="thread-stat rating-stat" title="Valutazione F95Zone">${escapeHtml(ratingText(game.f95_rating))}</span>
         <span class="thread-stat like-stat">♥ ${compactCount(game.likes)} like</span>
-        <span class="thread-stat">◉ ${compactCount(game.views)} visualizzazioni</span>
+        <span class="thread-stat views-stat">◉ ${compactCount(game.views)} visualizzazioni</span>
       </div>
       ${game.last_error ? `<div class="detail-error">${escapeHtml(game.last_error)}</div>` : ""}
       ${game.image_cache_errors?.length
@@ -1237,6 +1411,7 @@ function renderDetail(game) {
     </main>`;
   setupDetailTags(document.querySelector("#detail-content"));
   setupPhotoViewer(document.querySelector("#detail-content"));
+  setupGifPlayback(document.querySelector("#detail-content"));
   document.querySelector("#detail-close").addEventListener("click", () => detailModal.close());
   document.querySelector("#detail-sync").addEventListener("click", () => queueSync(game.id));
   document.querySelector("#edit-metadata").addEventListener("click", () => openMetadataEditor(game));
@@ -1487,6 +1662,7 @@ function renderSyncReports(reports) {
           </article>`).join("")}
       </div>
     </section>`).join("");
+  setupGifPlayback(document.querySelector("#sync-summary-list"));
   syncSummaryModal.showModal();
 }
 
@@ -1604,6 +1780,17 @@ document.querySelector("#theme-select").addEventListener("change", (event) => {
     errorElement.classList.remove("hidden");
   }
 });
+document.querySelector("#gif-playback-select").addEventListener("change", (event) => {
+  const errorElement = document.querySelector("#gif-settings-error");
+  try {
+    applyGifPlaybackPreference(event.currentTarget.value, true);
+    errorElement.classList.add("hidden");
+  } catch (error) {
+    event.currentTarget.value = gifPlaybackPreference;
+    errorElement.textContent = `Impossibile salvare la preferenza GIF in questo browser: ${error.message}`;
+    errorElement.classList.remove("hidden");
+  }
+});
 document.querySelector("#sync-mode").addEventListener("change", updateSyncIntervalInput);
 document.querySelector("#cleanup-temporary-files").addEventListener("click", async (event) => {
   const button = event.currentTarget;
@@ -1619,6 +1806,109 @@ document.querySelector("#cleanup-temporary-files").addEventListener("click", asy
     showNotice(
       `${result.removed_files} ${result.removed_files === 1 ? "file temporaneo rimosso" : "file temporanei rimossi"} (${formatBytes(result.removed_bytes)}).`,
     );
+  } catch (error) {
+    errorElement.textContent = error.message;
+    errorElement.classList.remove("hidden");
+  } finally {
+    button.disabled = false;
+  }
+});
+document.querySelector("#export-library-links").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  const errorElement = document.querySelector("#library-links-error");
+  button.disabled = true;
+  errorElement.classList.add("hidden");
+  try {
+    await downloadDataFile("/api/library/links/export");
+  } catch (error) {
+    errorElement.textContent = error.message;
+    errorElement.classList.remove("hidden");
+  } finally {
+    button.disabled = false;
+  }
+});
+document.querySelector("#import-library-links").addEventListener("click", () => {
+  document.querySelector("#library-links-file").click();
+});
+document.querySelector("#library-links-file").addEventListener("change", async (event) => {
+  const input = event.currentTarget;
+  const file = input.files[0];
+  const errorElement = document.querySelector("#library-links-error");
+  errorElement.classList.add("hidden");
+  input.value = "";
+  if (!file) return;
+  try {
+    if (file.size > 1024 * 1024) throw new Error("Il file dei link supera 1 MB.");
+    const links = (await file.text())
+      .replace(/^\uFEFF/, "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith("#"));
+    const result = await api("/api/library/links/import", {
+      method: "POST",
+      body: JSON.stringify({ links }),
+    });
+    if (result.added) {
+      if (state.pageView === "catalog") await loadCatalog();
+      else await loadGames();
+    }
+    showNotice(
+      `${result.added} ${result.added === 1 ? "gioco aggiunto" : "giochi aggiunti"}; ${result.existing} già presenti. I nuovi thread verranno scaricati.`,
+    );
+  } catch (error) {
+    errorElement.textContent = error.message;
+    errorElement.classList.remove("hidden");
+  }
+});
+document.querySelector("#export-library-backup").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  const errorElement = document.querySelector("#library-backup-error");
+  button.disabled = true;
+  errorElement.classList.add("hidden");
+  try {
+    await downloadDataFile("/api/backup");
+  } catch (error) {
+    errorElement.textContent = error.message;
+    errorElement.classList.remove("hidden");
+  } finally {
+    button.disabled = false;
+  }
+});
+document.querySelector("#import-library-backup").addEventListener("click", () => {
+  document.querySelector("#library-backup-file").click();
+});
+document.querySelector("#library-backup-file").addEventListener("change", async (event) => {
+  const input = event.currentTarget;
+  const file = input.files[0];
+  const errorElement = document.querySelector("#library-backup-error");
+  const button = document.querySelector("#import-library-backup");
+  errorElement.classList.add("hidden");
+  input.value = "";
+  if (!file) return;
+  if (!window.confirm("Il ripristino sostituirà completamente i dati attuali della libreria. Continuare?")) return;
+  button.disabled = true;
+  try {
+    const response = await fetch("/api/backup/restore", {
+      method: "POST",
+      headers: { "Content-Type": "application/zip" },
+      body: file,
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `Errore HTTP ${response.status}`);
+    settingsModal.close();
+    if (detailModal.open) detailModal.close();
+    state.activeGame = null;
+    state.selectionMode = false;
+    state.selectedGameIds.clear();
+    showNotice(`Backup ripristinato: ${result.restored} ${result.restored === 1 ? "gioco" : "giochi"}.`);
+    try {
+      await Promise.all([
+        state.pageView === "catalog" ? loadCatalog() : loadGames(),
+        loadAppSettings(),
+      ]);
+    } catch (error) {
+      showNotice(`Backup ripristinato, ma non riesco ad aggiornare la pagina: ${error.message}`, true);
+    }
   } catch (error) {
     errorElement.textContent = error.message;
     errorElement.classList.remove("hidden");
@@ -2009,6 +2299,7 @@ photoViewer.addEventListener("close", () => {
 });
 
 initializeTheme();
+initializeGifPlayback();
 restoreLibrarySort();
 initializeSyncReportCursor();
 loadGames().catch((error) => showNotice(error.message, true));

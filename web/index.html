@@ -37,7 +37,7 @@
         <header class="topbar">
           <div class="breadcrumbs">La tua libreria <span>/</span> <strong id="current-filter">Tutti i giochi</strong></div>
           <div class="top-actions">
-            <button class="icon-button" id="settings-button" title="Impostazioni" aria-label="Impostazioni">⚙</button>
+            <button class="icon-button" id="settings-button" title="Impostazioni" aria-label="Impostazioni"><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v2M12 19.5v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2.5 12h2m15 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/><circle cx="12" cy="12" r="8"/></svg></span></button>
             <div class="sync-control" id="library-sync-control">
               <button class="icon-button" id="sync-button" title="Controlla aggiornamenti" aria-label="Controlla aggiornamenti"><span class="sync-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg></span></button>
               <span class="sync-progress" id="sync-progress" aria-live="polite">0/0</span>
@@ -327,6 +327,14 @@
           <option value="light">Chiaro</option>
         </select>
         <p class="field-hint">La scelta viene salvata in questo browser.</p>
+        <label class="field-label" for="gif-playback-select">Riproduzione delle GIF</label>
+        <select id="gif-playback-select" class="settings-select">
+          <option value="auto">Automatica</option>
+          <option value="click">Solo quando premo l'immagine</option>
+          <option value="never">Mai</option>
+        </select>
+        <p class="field-hint">Con la riproduzione su richiesta, premi una GIF ferma per avviarla. La scelta viene salvata in questo browser.</p>
+        <div class="modal-error hidden" id="gif-settings-error" role="alert"></div>
       </section>
       <section class="settings-section">
         <div class="settings-section-heading">
@@ -349,6 +357,31 @@
         <div class="modal-actions">
           <button type="button" class="button button-primary" id="save-settings">Salva impostazioni</button>
         </div>
+      </section>
+      <section class="settings-section">
+        <div class="settings-section-heading">
+          <div><p class="eyebrow">LINK DELLA LIBRERIA</p><h3>Importa o esporta i link</h3></div>
+        </div>
+        <p class="settings-description">Esporta un file di testo con un link F95Zone per riga. Importandolo, l'app aggiunge i thread mancanti e ne scarica nuovamente i metadati; i giochi già presenti vengono ignorati.</p>
+        <div class="data-tools-actions">
+          <button type="button" class="button button-quiet" id="export-library-links">Esporta link</button>
+          <button type="button" class="button button-quiet" id="import-library-links">Importa link</button>
+          <input type="file" id="library-links-file" accept=".txt,.csv,text/plain" hidden>
+        </div>
+        <div class="modal-error hidden" id="library-links-error" role="alert"></div>
+      </section>
+      <section class="settings-section">
+        <div class="settings-section-heading">
+          <div><p class="eyebrow">BACKUP COMPLETO</p><h3>Backup e ripristino</h3></div>
+        </div>
+        <p class="settings-description">Il backup include giochi, dati personali, impostazioni, riepiloghi e immagini archiviate. Non include la sessione o i dati di accesso F95Zone.</p>
+        <div class="data-tools-actions">
+          <button type="button" class="button button-quiet" id="export-library-backup">Scarica backup</button>
+          <button type="button" class="button button-quiet" id="import-library-backup">Ripristina backup</button>
+          <input type="file" id="library-backup-file" accept=".zip,application/zip" hidden>
+        </div>
+        <p class="field-hint">Il ripristino sostituisce i dati attuali con quelli del backup. La sessione F95Zone già attiva su questa installazione viene mantenuta.</p>
+        <div class="modal-error hidden" id="library-backup-error" role="alert"></div>
       </section>
       <section class="settings-section">
         <div class="settings-section-heading">

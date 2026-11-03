@@ -1,8 +1,10 @@
 import json
+import io
 from email.message import Message
 import threading
 import tempfile
 import unittest
+import zipfile
 from http.cookiejar import CookieJar, Cookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -121,6 +123,20 @@ class MetadataParserTests(unittest.TestCase):
             app.parse_datetime("October 26, 2026 at 3:10 PM"),
             "2026-10-26T15:10:00+00:00",
         )
+
+    def test_developer_name_excludes_trailing_social_and_website_links(self):
+        source = """
+        <h1 class="p-title-value">Space Rescue: Code Pink</h1>
+        <article class="message--post message-threadStarterPost">
+          <div class="message-body"><div class="bbWrapper">
+            <p><b>Developer:</b> Robin Patreon - Website - Steam - Discord</p>
+          </div></div>
+        </article>
+        """
+
+        result = app.parse_thread_metadata(source, "https://f95zone.to/threads/space-rescue.123/")
+
+        self.assertEqual(result["developer"], "Robin")
 
     def test_banner_in_post_is_cover_and_site_logo_og_image_is_ignored(self):
         post = app.HtmlNode("div", {}, None)
@@ -269,7 +285,13 @@ class MetadataParserTests(unittest.TestCase):
             "status": "ok",
             "msg": {
                 "data": [
-                    {"thread_id": 456, "rating": 4.7, "likes": 1234, "views": 56789},
+                    {
+                        "thread_id": 456,
+                        "rating": 4.7,
+                        "likes": 1234,
+                        "views": 56789,
+                        "ts": 1793145600,
+                    },
                     {"thread_id": 789, "rating": 3.2, "likes": 99, "views": 111},
                 ]
             },
@@ -280,7 +302,12 @@ class MetadataParserTests(unittest.TestCase):
                 "https://f95zone.to/threads/example-game.456/",
             )
 
-        self.assertEqual(stats, {"f95_rating": 4.7, "likes": 1234, "views": 56789})
+        self.assertEqual(stats, {
+            "f95_rating": 4.7,
+            "likes": 1234,
+            "views": 56789,
+            "thread_updated_at": "2026-10-28T00:00:00+00:00",
+        })
         self.assertIn("latest_data.php?", request.call_args.args[0])
         self.assertIn("search=Example+Game", request.call_args.args[0])
         self.assertEqual(
@@ -874,6 +901,45 @@ class GameListingTests(unittest.TestCase):
         games = app.list_games(sort="rating", direction="desc")
         self.assertEqual([game["title"] for game in games], ["Bravo", "Charlie", "Alpha", "No F95 rating"])
 
+    def test_database_initialization_cleans_existing_developer_link_labels(self):
+        with app.database() as db:
+            db.execute(
+                """
+                INSERT INTO games (thread_url, title, developer, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "https://f95zone.to/threads/space-rescue.123/",
+                    "Space Rescue: Code Pink",
+                    "Robin Patreon - Website - Steam - Discord",
+                    "2026-01-01T00:00:00+00:00",
+                    "2026-01-01T00:00:00+00:00",
+                ),
+            )
+            db.execute(
+                """
+                INSERT INTO games (thread_url, title, developer, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "https://f95zone.to/threads/custom-game.124/",
+                    "Custom Game",
+                    "Custom Developer",
+                    "2026-01-01T00:00:00+00:00",
+                    "2026-01-01T00:00:00+00:00",
+                ),
+            )
+
+        app.initialize_db()
+
+        with app.database() as db:
+            developers = {
+                row["title"]: row["developer"]
+                for row in db.execute("SELECT title, developer FROM games")
+            }
+        self.assertEqual(developers["Space Rescue: Code Pink"], "Robin")
+        self.assertEqual(developers["Custom Game"], "Custom Developer")
+
 
 class SyncTests(unittest.TestCase):
     def setUp(self):
@@ -1296,6 +1362,156 @@ class AppSettingsTests(unittest.TestCase):
         ):
             with self.subTest(settings=settings), self.assertRaises(ValueError):
                 app.validate_sync_settings(settings)
+
+    def test_import_library_links_adds_only_missing_threads_and_queues_sync(self):
+        existing_url = "https://f95zone.to/threads/existing-game.123/"
+        new_url = "https://f95zone.to/threads/new-game.456/"
+        with app.database() as db:
+            db.execute(
+                "INSERT INTO games (thread_url, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                (existing_url, "Existing Game", app.now_iso(), app.now_iso()),
+            )
+
+        with patch.object(app, "queue_sync_jobs", return_value={"active": True}) as queue:
+            result = app.import_library_links([
+                existing_url,
+                "https://www.f95zone.to/threads/old-title.123/",
+                "https://www.f95zone.to/threads/new-game.456/?ref=share",
+                new_url,
+            ])
+
+        self.assertEqual(result, {"added": 1, "existing": 3})
+        queue.assert_called_once_with([2], report_changes=False)
+        games = app.list_games()
+        self.assertEqual(len(games), 2)
+        imported = next(game for game in games if game["thread_url"] == new_url)
+        self.assertEqual(imported["title"], "new game")
+
+    def test_library_backup_restores_data_and_images_without_overwriting_f95_session(self):
+        image_url = "https://attachments.f95zone.to/backup-image.jpg"
+        image_filename = app.image_cache_filename(image_url)
+        created_at = app.now_iso()
+        with app.database() as db:
+            db.execute(
+                """
+                INSERT INTO games (
+                    thread_url, title, developer, notes, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "https://f95zone.to/threads/backup-game.123/",
+                    "Backup Game",
+                    "Developer",
+                    "Saved note",
+                    created_at,
+                    created_at,
+                ),
+            )
+            db.execute("UPDATE settings SET value = 'manual' WHERE key = 'sync_mode'")
+            db.execute(
+                "INSERT INTO settings (key, value) VALUES ('f95_cookies', 'secret-cookie')"
+            )
+            db.execute(
+                "INSERT INTO settings (key, value) VALUES ('f95_username', 'local-user')"
+            )
+            db.execute(
+                """
+                INSERT INTO image_cache (source_url, filename, content_type, updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (image_url, image_filename, "image/jpeg", created_at),
+            )
+        images_dir = app.image_cache_directory()
+        images_dir.mkdir()
+        (images_dir / image_filename).write_bytes(b"backup-image")
+        backup = app.create_library_backup()
+
+        with zipfile.ZipFile(io.BytesIO(backup)) as archive:
+            self.assertNotIn(b"secret-cookie", archive.read("library.sqlite3"))
+            self.assertIn(f"images/{image_filename}", archive.namelist())
+
+        with app.database() as db:
+            db.execute("DELETE FROM games")
+            db.execute("UPDATE settings SET value = 'days' WHERE key = 'sync_mode'")
+        (images_dir / image_filename).unlink()
+        app.restore_library_backup(backup)
+
+        restored = app.list_games()
+        self.assertEqual(len(restored), 1)
+        self.assertEqual(restored[0]["notes"], "Saved note")
+        self.assertEqual(app.read_setting("sync_mode"), "manual")
+        self.assertEqual(app.read_setting("f95_cookies"), "secret-cookie")
+        self.assertEqual(app.read_setting("f95_username"), "local-user")
+        self.assertEqual((images_dir / image_filename).read_bytes(), b"backup-image")
+
+    def test_library_backup_rejects_invalid_archives_without_changing_library(self):
+        with app.database() as db:
+            db.execute(
+                "INSERT INTO games (thread_url, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                (
+                    "https://f95zone.to/threads/keep-game.123/",
+                    "Keep Game",
+                    app.now_iso(),
+                    app.now_iso(),
+                ),
+            )
+        with self.assertRaisesRegex(ValueError, "backup valido"):
+            app.restore_library_backup(b"not a zip file")
+        self.assertEqual([game["title"] for game in app.list_games()], ["Keep Game"])
+
+    def test_library_transfer_http_endpoints(self):
+        created_at = app.now_iso()
+        with app.database() as db:
+            db.execute(
+                "INSERT INTO games (thread_url, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                (
+                    "https://f95zone.to/threads/endpoint-game.123/",
+                    "Endpoint Game",
+                    created_at,
+                    created_at,
+                ),
+            )
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.LibraryHandler)
+        server_thread = threading.Thread(target=server.serve_forever)
+        server_thread.start()
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        try:
+            with urlopen(f"{base_url}/api/library/links/export") as response:
+                self.assertIn("f95-library-links.txt", response.headers["Content-Disposition"])
+                self.assertEqual(
+                    response.read(),
+                    b"https://f95zone.to/threads/endpoint-game.123/\n",
+                )
+            with patch.object(app, "queue_sync_jobs", return_value={"active": True}) as queue:
+                request = Request(
+                    f"{base_url}/api/library/links/import",
+                    data=json.dumps({
+                        "links": ["https://www.f95zone.to/threads/endpoint-game.123/"]
+                    }).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(request) as response:
+                    self.assertEqual(json.loads(response.read()), {"added": 0, "existing": 1})
+                queue.assert_not_called()
+
+            with urlopen(f"{base_url}/api/backup") as response:
+                backup = response.read()
+                self.assertEqual(response.headers["Content-Type"], "application/zip")
+            with app.database() as db:
+                db.execute("DELETE FROM games")
+            request = Request(
+                f"{base_url}/api/backup/restore",
+                data=backup,
+                headers={"Content-Type": "application/zip"},
+                method="POST",
+            )
+            with urlopen(request) as response:
+                self.assertEqual(json.loads(response.read()), {"restored": 1})
+        finally:
+            server.shutdown()
+            server.server_close()
+            server_thread.join()
 
 
 class TemporaryFileCleanupTests(unittest.TestCase):

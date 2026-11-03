@@ -1,12 +1,17 @@
 import hashlib
 import html
+import io
 import json
 import os
 import re
+import shutil
 import sqlite3
+import stat
+import tempfile
 import threading
 import time
 import uuid
+import zipfile
 from http.cookiejar import Cookie, CookieJar
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -37,8 +42,11 @@ ALLOWED_IMAGE_HOSTS = {
 }
 MAX_PAGE_BYTES = 4 * 1024 * 1024
 MAX_IMAGE_BYTES = 50 * 1024 * 1024
+MAX_BACKUP_BYTES = 512 * 1024 * 1024
+MAX_LINK_IMPORTS = 5000
 DEV_MODE = os.environ.get("DEV_MODE") == "1"
 SYNC_LOCK = threading.Lock()
+RESTORE_IN_PROGRESS = False
 SETTINGS_CHANGED = threading.Event()
 SYNC_PROGRESS_LOCK = threading.Lock()
 SYNC_QUEUE = []
@@ -515,6 +523,19 @@ def extract_field(text, labels):
     return normalize_text(match.group(1)).strip(" \t|")[:300] if match else ""
 
 
+def clean_developer_name(value):
+    link_labels = (
+        "Patreon", "SubscribeStar", "Website", "Web site", "Steam", "Discord",
+        "Twitter", "X", "Itch.io", "Gumroad", "Ko-fi", "Kofi", "Reddit",
+        "Tumblr", "Instagram", "YouTube", "Youtube",
+    )
+    suffix = "|".join(re.escape(label) for label in sorted(link_labels, key=len, reverse=True))
+    cleaned = normalize_text(value)
+    while re.search(rf"(?:[\s|·•,;–—-]+)(?:{suffix})\s*$", cleaned, re.I):
+        cleaned = re.sub(rf"(?:[\s|·•,;–—-]+)(?:{suffix})\s*$", "", cleaned, flags=re.I)
+    return cleaned.strip(" \t|·•,;–—-")
+
+
 OVERVIEW_STOP_LABELS = (
     "thread updated", "thread update", "updated", "last updated", "last update",
     "update date", "release date", "released", "developer", "developers", "creator",
@@ -688,11 +709,15 @@ def fetch_catalog_stats(title, thread_url):
         rating = None
     if rating is not None and not 0 <= rating <= 5:
         rating = None
-    return {
+    stats = {
         "f95_rating": rating,
         "likes": catalog_metric(game.get("likes"), 5_000_000),
         "views": catalog_metric(game.get("views"), 500_000_000),
     }
+    updated_at = parse_datetime(str(game.get("ts") or ""))
+    if updated_at:
+        stats["thread_updated_at"] = updated_at
+    return stats
 
 
 def catalog_named_items(value, key):
@@ -1213,7 +1238,7 @@ def parse_thread_metadata(html, thread_url):
     if not title_heading and not og_title and not post_node:
         raise ValueError("La pagina ricevuta non contiene i dati di un thread F95Zone.")
 
-    developer = (
+    developer = clean_developer_name(
         extract_field(post_text, ["developer", "developers", "creator", "author", "publisher"])
         or title_parts["creator"]
     )
@@ -2081,6 +2106,15 @@ def initialize_db():
         db.execute(
             "UPDATE games SET latest_version = version WHERE latest_version = '' AND version != ''"
         )
+        for game in db.execute(
+            "SELECT id, developer FROM games WHERE developer != ''"
+        ).fetchall():
+            developer = clean_developer_name(game["developer"])
+            if developer != game["developer"]:
+                db.execute(
+                    "UPDATE games SET developer = ? WHERE id = ?",
+                    (developer, game["id"]),
+                )
 
 
 def game_to_dict(row):
@@ -2466,6 +2500,8 @@ def queue_sync_jobs(game_ids=None, *, report_changes=True):
     else:
         requested_ids = list(dict.fromkeys(int(game_id) for game_id in game_ids))
     with SYNC_PROGRESS_LOCK:
+        if RESTORE_IN_PROGRESS:
+            raise ValueError("Attendi la fine del ripristino prima di avviare la sincronizzazione.")
         previously_active = SYNC_PROGRESS["active"]
         queued_ids = set(SYNC_QUEUE)
         if SYNC_CURRENT_ID is not None:
@@ -2546,6 +2582,252 @@ def parse_json_body(handler):
         raise ValueError("Corpo JSON non valido.") from exc
 
 
+def import_library_links(links):
+    if not isinstance(links, list) or not links or len(links) > MAX_LINK_IMPORTS:
+        raise ValueError(f"Seleziona da 1 a {MAX_LINK_IMPORTS} link F95Zone.")
+    thread_urls = []
+    seen_threads = set()
+    existing = 0
+    for link in links:
+        thread_url = "https://f95zone.to" + urlsplit(normalize_thread_url(link)).path
+        thread_id = thread_id_from_url(thread_url)
+        identity = ("id", thread_id) if thread_id is not None else ("url", thread_url)
+        if identity in seen_threads:
+            existing += 1
+            continue
+        seen_threads.add(identity)
+        thread_urls.append(thread_url)
+
+    added_ids = []
+    with database() as db:
+        existing_thread_ids = set()
+        existing_thread_urls = set()
+        for row in db.execute("SELECT thread_url FROM games"):
+            existing_thread_urls.add(row["thread_url"])
+            if (thread_id := thread_id_from_url(row["thread_url"])) is not None:
+                existing_thread_ids.add(thread_id)
+        for thread_url in thread_urls:
+            thread_id = thread_id_from_url(thread_url)
+            if (
+                thread_url in existing_thread_urls
+                or (thread_id is not None and thread_id in existing_thread_ids)
+            ):
+                existing += 1
+                continue
+            created_at = now_iso()
+            try:
+                cursor = db.execute(
+                    """
+                    INSERT INTO games (thread_url, title, created_at, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (thread_url, title_from_thread_url(thread_url), created_at, created_at),
+                )
+            except sqlite3.IntegrityError:
+                existing += 1
+            else:
+                added_ids.append(cursor.lastrowid)
+    if added_ids:
+        queue_sync_jobs(added_ids, report_changes=False)
+    return {"added": len(added_ids), "existing": existing}
+
+
+def create_library_backup():
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=DB_PATH.parent) as temp_dir:
+        snapshot_path = Path(temp_dir) / "library.sqlite3"
+        source = sqlite3.connect(DB_PATH, timeout=10)
+        snapshot = sqlite3.connect(snapshot_path)
+        try:
+            source.backup(snapshot)
+            snapshot.execute("DELETE FROM settings WHERE substr(key, 1, 4) = 'f95_'")
+            snapshot.commit()
+            snapshot.execute("VACUUM")
+        finally:
+            snapshot.close()
+            source.close()
+
+        archive_buffer = io.BytesIO()
+        content_size = snapshot_path.stat().st_size
+        if content_size > MAX_BACKUP_BYTES:
+            raise ValueError("Il backup supera la dimensione massima consentita.")
+        with zipfile.ZipFile(archive_buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(
+                "manifest.json",
+                json.dumps({"format": "f95-game-library-backup", "version": 1}),
+            )
+            archive.write(snapshot_path, "library.sqlite3")
+            images_dir = image_cache_directory()
+            if images_dir.is_dir():
+                for image_path in images_dir.iterdir():
+                    if (
+                        image_path.is_file()
+                        and re.fullmatch(r"[a-f0-9]{64}", image_path.name)
+                        and not image_path.is_symlink()
+                    ):
+                        image_size = image_path.stat().st_size
+                        if image_size > MAX_IMAGE_BYTES:
+                            raise ValueError("Una delle immagini supera la dimensione massima consentita.")
+                        content_size += image_size
+                        if content_size > MAX_BACKUP_BYTES:
+                            raise ValueError("Il backup supera la dimensione massima consentita.")
+                        archive.write(image_path, f"images/{image_path.name}")
+        payload = archive_buffer.getvalue()
+    if len(payload) > MAX_BACKUP_BYTES:
+        raise ValueError("Il backup supera la dimensione massima consentita.")
+    return payload
+
+
+def restore_library_backup(payload):
+    global RESTORE_IN_PROGRESS
+    if not isinstance(payload, bytes) or not payload or len(payload) > MAX_BACKUP_BYTES:
+        raise ValueError("File di backup vuoto o troppo grande.")
+    with SYNC_PROGRESS_LOCK:
+        if RESTORE_IN_PROGRESS:
+            raise ValueError("Un ripristino backup è già in corso.")
+        if SYNC_PROGRESS["active"]:
+            raise ValueError("Attendi la fine della sincronizzazione prima di ripristinare il backup.")
+        RESTORE_IN_PROGRESS = True
+    try:
+        result = _restore_library_backup(payload)
+        SETTINGS_CHANGED.set()
+        return result
+    finally:
+        with SYNC_PROGRESS_LOCK:
+            RESTORE_IN_PROGRESS = False
+
+
+def _restore_library_backup(payload):
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=DB_PATH.parent) as temp_dir:
+        staging_dir = Path(temp_dir)
+        snapshot_path = staging_dir / "library.sqlite3"
+        staged_images = staging_dir / "images"
+        staged_images.mkdir()
+        try:
+            with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                entries = {}
+                total_size = 0
+                for info in archive.infolist():
+                    name = info.filename
+                    is_image = re.fullmatch(r"images/[a-f0-9]{64}", name)
+                    if name not in {"manifest.json", "library.sqlite3"} and not is_image:
+                        raise ValueError("Il backup contiene file non supportati.")
+                    if name in entries or info.is_dir():
+                        raise ValueError("Il backup contiene file duplicati o non validi.")
+                    if (info.external_attr >> 16) & 0o170000 not in (0, stat.S_IFREG):
+                        raise ValueError("Il backup contiene un tipo di file non valido.")
+                    if info.file_size < 0 or info.file_size > MAX_BACKUP_BYTES:
+                        raise ValueError("Il backup contiene un file troppo grande.")
+                    if name == "manifest.json" and info.file_size > 4096:
+                        raise ValueError("Il manifesto del backup non è valido.")
+                    total_size += info.file_size
+                    if total_size > MAX_BACKUP_BYTES:
+                        raise ValueError("Il backup supera la dimensione massima consentita.")
+                    entries[name] = info
+                if not {"manifest.json", "library.sqlite3"}.issubset(entries):
+                    raise ValueError("Il file non è un backup valido della libreria.")
+                manifest = json.loads(archive.read(entries["manifest.json"]))
+                if manifest != {"format": "f95-game-library-backup", "version": 1}:
+                    raise ValueError("Formato o versione del backup non supportati.")
+                for name, info in entries.items():
+                    if name in {"manifest.json", "library.sqlite3"}:
+                        target = staging_dir / name
+                    else:
+                        target = staged_images / name.split("/", 1)[1]
+                        if info.file_size > MAX_IMAGE_BYTES:
+                            raise ValueError("Il backup contiene un'immagine troppo grande.")
+                    with archive.open(info) as source, target.open("wb") as destination:
+                        shutil.copyfileobj(source, destination, 64 * 1024)
+        except zipfile.BadZipFile as exc:
+            raise ValueError("Il file non è un backup valido della libreria.") from exc
+        except (OSError, UnicodeError, json.JSONDecodeError, RuntimeError) as exc:
+            raise ValueError("Impossibile leggere il file di backup.") from exc
+
+        try:
+            incoming = sqlite3.connect(snapshot_path)
+        except sqlite3.Error as exc:
+            raise ValueError("Il database nel backup non è integro o non è compatibile.") from exc
+        try:
+            integrity = incoming.execute("PRAGMA integrity_check").fetchone()
+            tables = {
+                row[0] for row in incoming.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            if integrity != ("ok",) or not {"games", "settings", "sync_reports", "image_cache"}.issubset(tables):
+                raise ValueError("Il database nel backup non è integro o non è compatibile.")
+        except sqlite3.Error as exc:
+            raise ValueError("Il database nel backup non è integro o non è compatibile.") from exc
+        finally:
+            incoming.close()
+
+        images_dir = image_cache_directory()
+        previous_images = staging_dir / "previous-images"
+        if images_dir.exists():
+            os.replace(images_dir, previous_images)
+        try:
+            os.replace(staged_images, images_dir)
+            with database() as db:
+                current_auth = {
+                    row["key"]: row["value"]
+                    for row in db.execute(
+                        "SELECT key, value FROM settings WHERE substr(key, 1, 4) = 'f95_'"
+                    )
+                }
+                db.execute("ATTACH DATABASE ? AS restored_backup", (str(snapshot_path),))
+                tables_to_restore = ("games", "settings", "sync_reports", "image_cache")
+                required_columns = {
+                    "games": {"id", "thread_url", "title", "created_at", "updated_at"},
+                    "settings": {"key", "value"},
+                    "sync_reports": {"id", "created_at", "games"},
+                    "image_cache": {"source_url", "filename", "content_type", "updated_at"},
+                }
+                for table in tables_to_restore:
+                    current_columns = {
+                        row["name"] for row in db.execute(f'PRAGMA main.table_info("{table}")')
+                    }
+                    backup_columns = {
+                        row["name"] for row in db.execute(f'PRAGMA restored_backup.table_info("{table}")')
+                    }
+                    if not required_columns[table].issubset(backup_columns):
+                        raise ValueError("Il database nel backup non è compatibile.")
+                    columns = sorted(current_columns & backup_columns)
+                    if not columns:
+                        raise ValueError("Il database nel backup non è compatibile.")
+                    quoted_columns = ", ".join(
+                        '"' + column.replace('"', '""') + '"' for column in columns
+                    )
+                    db.execute(f'DELETE FROM main."{table}"')
+                    if table == "settings":
+                        db.execute(
+                            f'INSERT INTO main."{table}" ({quoted_columns}) '
+                            f'SELECT {quoted_columns} FROM restored_backup."{table}" '
+                            "WHERE substr(key, 1, 4) != 'f95_'"
+                        )
+                        db.executemany(
+                            "INSERT OR REPLACE INTO main.settings (key, value) VALUES (?, ?)",
+                            current_auth.items(),
+                        )
+                        db.execute(
+                            "INSERT OR REPLACE INTO main.settings (key, value) VALUES ('sync_report_epoch', ?)",
+                            (uuid.uuid4().hex,),
+                        )
+                    else:
+                        db.execute(
+                            f'INSERT INTO main."{table}" ({quoted_columns}) '
+                            f'SELECT {quoted_columns} FROM restored_backup."{table}"'
+                        )
+                game_count = db.execute("SELECT COUNT(*) FROM main.games").fetchone()[0]
+        except (OSError, sqlite3.Error, ValueError):
+            if images_dir.exists():
+                shutil.rmtree(images_dir)
+            if previous_images.exists():
+                os.replace(previous_images, images_dir)
+            raise
+        return {"restored": game_count}
+
+
 def validate_game_fields(data, creating=False):
     allowed = {
         "title", "developer", "game_status", "engine", "tags", "user_version",
@@ -2623,11 +2905,23 @@ class LibraryHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_download(self, payload, filename, content_type):
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(payload)
+
     def do_GET(self):
         if DEV_MODE:
             del self.headers["If-Modified-Since"]
             del self.headers["If-None-Match"]
         parts = urlsplit(self.path)
+        if RESTORE_IN_PROGRESS and parts.path.startswith("/api/"):
+            self.send_json({"error": "Ripristino backup in corso. Riprova tra poco."}, 409)
+            return
         if parts.path == "/api/image":
             image_url = parse_qs(parts.query).get("url", [""])[0]
             cached_image = get_cached_f95_image_file(image_url)
@@ -2741,6 +3035,25 @@ class LibraryHandler(SimpleHTTPRequestHandler):
         if parts.path == "/api/settings":
             self.send_json(get_sync_settings())
             return
+        if parts.path == "/api/library/links/export":
+            with database() as db:
+                links = [
+                    row["thread_url"]
+                    for row in db.execute("SELECT thread_url FROM games ORDER BY title COLLATE NOCASE")
+                ]
+            payload = ("\n".join(links) + ("\n" if links else "")).encode("utf-8")
+            self.send_download(payload, "f95-library-links.txt", "text/plain; charset=utf-8")
+            return
+        if parts.path == "/api/backup":
+            try:
+                self.send_download(
+                    create_library_backup(),
+                    "f95-library-backup.zip",
+                    "application/zip",
+                )
+            except (OSError, sqlite3.Error, ValueError) as exc:
+                self.send_json({"error": f"Impossibile creare il backup: {exc}"}, 500)
+            return
         if parts.path == "/api/maintenance/temporary-files":
             try:
                 self.send_json(temporary_file_cleanup_status())
@@ -2756,6 +3069,23 @@ class LibraryHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         parts = urlsplit(self.path)
+        if RESTORE_IN_PROGRESS and parts.path != "/api/backup/restore":
+            self.send_json({"error": "Ripristino backup in corso. Riprova tra poco."}, 409)
+            return
+        if parts.path == "/api/backup/restore":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > MAX_BACKUP_BYTES:
+                    raise ValueError("File di backup vuoto o troppo grande.")
+                payload = self.rfile.read(length)
+                if len(payload) != length:
+                    raise ValueError("Caricamento del backup incompleto.")
+                self.send_json(restore_library_backup(payload))
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, 400)
+            except (OSError, sqlite3.Error) as exc:
+                self.send_json({"error": f"Impossibile ripristinare il backup: {exc}"}, 500)
+            return
         try:
             data = parse_json_body(self)
             if parts.path == "/api/settings/login":
@@ -2775,6 +3105,10 @@ class LibraryHandler(SimpleHTTPRequestHandler):
                     )
                 SETTINGS_CHANGED.set()
                 self.send_json(settings)
+                return
+            if parts.path == "/api/library/links/import":
+                result = import_library_links(data.get("links"))
+                self.send_json(result, 201)
                 return
             if parts.path == "/api/maintenance/temporary-files":
                 try:
@@ -2829,6 +3163,9 @@ class LibraryHandler(SimpleHTTPRequestHandler):
             self.send_json({"error": "Questo thread è già presente nella libreria."}, 409)
 
     def do_PATCH(self):
+        if RESTORE_IN_PROGRESS:
+            self.send_json({"error": "Ripristino backup in corso. Riprova tra poco."}, 409)
+            return
         match = re.fullmatch(r"/api/games/(\d+)", urlsplit(self.path).path)
         if not match:
             self.send_json({"error": "Endpoint non trovato."}, 404)
@@ -2846,6 +3183,9 @@ class LibraryHandler(SimpleHTTPRequestHandler):
             self.send_json({"error": str(exc)}, 400)
 
     def do_DELETE(self):
+        if RESTORE_IN_PROGRESS:
+            self.send_json({"error": "Ripristino backup in corso. Riprova tra poco."}, 409)
+            return
         path = urlsplit(self.path).path
         if path == "/api/settings/auth":
             logout_f95zone()
