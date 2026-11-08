@@ -324,6 +324,7 @@ class MetadataParserTests(unittest.TestCase):
                         "likes": 1234,
                         "views": 56789,
                         "ts": 1793145600,
+                        "creator": "Breadman Games",
                     },
                     {"thread_id": 789, "rating": 3.2, "likes": 99, "views": 111},
                 ]
@@ -340,6 +341,7 @@ class MetadataParserTests(unittest.TestCase):
             "likes": 1234,
             "views": 56789,
             "thread_updated_at": "2026-10-28T00:00:00+00:00",
+            "developer": "Breadman Games",
         })
         self.assertIn("latest_data.php?", request.call_args.args[0])
         self.assertIn("search=Example+Game", request.call_args.args[0])
@@ -370,6 +372,46 @@ class MetadataParserTests(unittest.TestCase):
         with patch.object(app, "f95_request", return_value=(response, None)):
             stats = app.fetch_catalog_stats("Example Game", "https://f95zone.to/threads/56872/")
         self.assertIsNotNone(stats)
+
+    def test_thread_metadata_uses_sam_developer_and_not_thread_developer(self):
+        thread_url = "https://f95zone.to/threads/example.456/"
+        thread_metadata = {
+            "title": "Example",
+            "developer": "Wrong Link Text",
+            "has_first_post": True,
+            "page_one_url": "",
+        }
+        with (
+            patch.object(app, "f95_request", return_value=(b"html", urlsplit(thread_url))),
+            patch.object(app, "parse_thread_metadata", return_value=thread_metadata),
+            patch.object(app, "fetch_catalog_stats", return_value={"developer": "Studio & Co"}),
+        ):
+            result = app.fetch_thread_metadata(thread_url)
+        self.assertEqual(result["developer"], "Studio & Co")
+
+        for catalog_result in (None, {}, {"developer": ""}):
+            with (
+                self.subTest(catalog_result=catalog_result),
+                patch.object(app, "f95_request", return_value=(b"html", urlsplit(thread_url))),
+                patch.object(app, "parse_thread_metadata", return_value={**thread_metadata, "developer": "Wrong Link Text", "has_first_post": True, "page_one_url": ""}),
+                patch.object(app, "fetch_catalog_stats", return_value=catalog_result),
+            ):
+                result = app.fetch_thread_metadata(thread_url)
+            self.assertEqual(result["developer"], "")
+
+    def test_thread_metadata_does_not_use_thread_developer_when_sam_fails(self):
+        thread_url = "https://f95zone.to/threads/example.456/"
+        thread_metadata = {
+            "title": "Example", "developer": "Wrong Link Text",
+            "has_first_post": True, "page_one_url": "",
+        }
+        with (
+            patch.object(app, "f95_request", return_value=(b"html", urlsplit(thread_url))),
+            patch.object(app, "parse_thread_metadata", return_value=thread_metadata),
+            patch.object(app, "fetch_catalog_stats", side_effect=ValueError("SAM unavailable")),
+        ):
+            result = app.fetch_thread_metadata(thread_url)
+        self.assertEqual(result["developer"], "")
 
     def test_overview_stops_at_thread_metadata_and_known_sections(self):
         text = (
@@ -957,7 +999,7 @@ class GameListingTests(unittest.TestCase):
         games = app.list_games(sort="rating", direction="desc")
         self.assertEqual([game["title"] for game in games], ["Bravo", "Charlie", "Alpha", "No F95 rating"])
 
-    def test_database_initialization_cleans_existing_developer_link_labels(self):
+    def test_database_initialization_preserves_developer_names(self):
         with app.database() as db:
             db.execute(
                 """
@@ -993,7 +1035,7 @@ class GameListingTests(unittest.TestCase):
                 row["title"]: row["developer"]
                 for row in db.execute("SELECT title, developer FROM games")
             }
-        self.assertEqual(developers["Space Rescue: Code Pink"], "Robin")
+        self.assertEqual(developers["Space Rescue: Code Pink"], "Robin Patreon - Website - Steam - Discord")
         self.assertEqual(developers["Custom Game"], "Custom Developer")
         with app.database() as db:
             cursor = db.execute(
@@ -1010,7 +1052,7 @@ class GameListingTests(unittest.TestCase):
                 ),
             )
             game_id = cursor.lastrowid
-        self.assertEqual(app.get_game(game_id)["developer"], "Robin")
+        self.assertEqual(app.get_game(game_id)["developer"], "Robin SubscribeStar.com • Official Website")
 
 
 class SyncTests(unittest.TestCase):
@@ -1264,10 +1306,10 @@ class SyncTests(unittest.TestCase):
             app.sync_game(1)
         self.assertIsNone(app.get_cached_f95_image("https://attachments.f95zone.to/new-shot.jpg"))
 
-    def test_sync_replaces_existing_developer_when_thread_has_links_in_field(self):
+    def test_sync_replaces_existing_developer_with_sam_value(self):
         with app.database() as db:
             db.execute("UPDATE games SET developer = ? WHERE id = 1", (
-                "Breadman Games SubscribeStar - Ko-fi - Website - Discord - Discord Stream",
+                "Breadman Games Any Link Label",
             ))
         metadata = {
             "title": "Test Game",
@@ -1275,7 +1317,6 @@ class SyncTests(unittest.TestCase):
             "gallery": [],
             "description": "",
             "developer": "Breadman Games",
-            "developer_links_removed": True,
             "version": "",
             "engine": "",
             "game_status": "",
@@ -1287,6 +1328,51 @@ class SyncTests(unittest.TestCase):
             game = app.sync_game(1)
 
         self.assertEqual(game["developer"], "Breadman Games")
+
+    def test_sync_preserves_saved_developer_when_sam_has_no_creator(self):
+        with app.database() as db:
+            db.execute("UPDATE games SET developer = ? WHERE id = 1", ("Existing Studio",))
+        metadata = {
+            "title": "Test Game", "image_url": "", "gallery": [], "description": "",
+            "developer": "", "version": "", "engine": "", "game_status": "",
+            "tags": [], "thread_updated_at": None,
+        }
+        with patch.object(app, "fetch_thread_metadata", return_value=metadata):
+            game = app.sync_game(1)
+        self.assertEqual(game["developer"], "Existing Studio")
+
+    def test_sync_fetches_and_persists_sam_creator_by_matching_thread_id(self):
+        thread_url = "https://f95zone.to/threads/test.123/"
+        thread_metadata = {
+            "title": "Test Game", "image_url": "", "gallery": [], "description": "",
+            "developer": "Thread Name Arbitrary Link", "version": "", "engine": "",
+            "game_status": "", "tags": [], "thread_updated_at": None,
+            "has_first_post": True, "page_one_url": "",
+        }
+        catalog = json.dumps({
+            "status": "ok",
+            "msg": {"data": [
+                {"thread_id": 456, "creator": "Wrong Studio"},
+                {"thread_id": 123, "creator": "Studio &amp; Discord"},
+            ]},
+        }).encode()
+        with app.database() as db:
+            db.execute("UPDATE games SET developer = ? WHERE id = 1", ("Old Any Link",))
+        with (
+            patch.object(app, "f95_request", side_effect=[
+                (b"html", urlsplit(thread_url)), (catalog, None),
+            ]),
+            patch.object(app, "parse_thread_metadata", return_value=thread_metadata),
+        ):
+            game = app.sync_game(1)
+
+        self.assertEqual(game["developer"], "Studio & Discord")
+        self.assertEqual(
+            [game["id"] for game in app.list_games(developer_search="Studio & Discord")],
+            [1],
+        )
+        app.initialize_db()
+        self.assertEqual(app.get_game(1)["developer"], "Studio & Discord")
 
     def test_existing_gallery_hides_signed_url_duplicates(self):
         with app.database() as db:

@@ -725,6 +725,9 @@ def fetch_catalog_stats(title, thread_url):
         "likes": catalog_metric(game.get("likes"), 5_000_000),
         "views": catalog_metric(game.get("views"), 500_000_000),
     }
+    creator = game.get("creator")
+    if isinstance(creator, str) and creator.strip():
+        stats["developer"] = html.unescape(creator).strip()[:300]
     updated_at = parse_datetime(str(game.get("ts") or ""))
     if updated_at:
         stats["thread_updated_at"] = updated_at
@@ -885,7 +888,6 @@ def fetch_catalog_game_details(raw_thread_id):
         raise ValueError("ID del thread non valido.")
     thread_url = f"https://f95zone.to/threads/{thread_id}/"
     metadata = fetch_thread_metadata(thread_url)
-    metadata.pop("developer_links_removed", None)
     return {
         **metadata,
         "thread_id": thread_id,
@@ -2001,13 +2003,17 @@ def fetch_thread_metadata(thread_url):
                 metadata = first_page
     metadata.pop("page_one_url", None)
     metadata.pop("has_first_post", None)
+    metadata.pop("developer_links_removed", None)
+    metadata["developer"] = ""
     try:
         catalog_stats = fetch_catalog_stats(metadata["title"], thread_url)
     except ValueError as exc:
-        print(f"Impossibile leggere le statistiche del catalogo F95Zone per {thread_url}: {exc}", flush=True)
+        print(f"Impossibile leggere i dati del catalogo F95Zone per {thread_url}: {exc}", flush=True)
     else:
         if catalog_stats:
             metadata.update(catalog_stats)
+        if not metadata["developer"]:
+            print(f"Sviluppatore non disponibile nel catalogo F95Zone per {thread_url}.", flush=True)
     return metadata
 
 
@@ -2132,20 +2138,10 @@ def initialize_db():
         db.execute(
             "UPDATE games SET latest_version = version WHERE latest_version = '' AND version != ''"
         )
-        for game in db.execute(
-            "SELECT id, developer FROM games WHERE developer != ''"
-        ).fetchall():
-            developer = clean_developer_name(game["developer"])
-            if developer != game["developer"]:
-                db.execute(
-                    "UPDATE games SET developer = ? WHERE id = ?",
-                    (developer, game["id"]),
-                )
 
 
 def game_to_dict(row):
     game = dict(row)
-    game["developer"] = clean_developer_name(game.get("developer", ""))
     if not game.get("latest_version"):
         game["latest_version"] = game.get("version", "")
     game.setdefault("user_version", "")
@@ -2342,12 +2338,7 @@ def sync_game(game_id, *, prune_cache=True):
                         f95_rating = COALESCE(?, f95_rating),
                         likes = CASE WHEN ? > 0 THEN ? ELSE likes END,
                         views = CASE WHEN ? > 0 THEN ? ELSE views END,
-                        developer = CASE
-                            WHEN ? AND ? != '' THEN ?
-                            WHEN developer = '' THEN ?
-                            WHEN developer != ? THEN ?
-                            ELSE developer
-                        END,
+                        developer = COALESCE(NULLIF(?, ''), developer),
                         engine = CASE WHEN engine = '' THEN ? ELSE engine END,
                         game_status = COALESCE(NULLIF(?, ''), game_status),
                         tags = CASE WHEN tags = '[]' THEN ? ELSE tags END,
@@ -2363,9 +2354,7 @@ def sync_game(game_id, *, prune_cache=True):
                         metadata["version"], metadata["version"], metadata.get("f95_rating"),
                         metadata.get("likes", 0), metadata.get("likes", 0),
                         metadata.get("views", 0), metadata.get("views", 0),
-                        int(bool(metadata.get("developer_links_removed"))), metadata["developer"],
-                        metadata["developer"],
-                        metadata["developer"], game["developer"], game["developer"], metadata["engine"],
+                        metadata["developer"], metadata["engine"],
                         metadata["game_status"], json.dumps(metadata["tags"], ensure_ascii=False),
                         new_timestamp, now_iso(), int(is_newer), now_iso(), game_id,
                     ),
