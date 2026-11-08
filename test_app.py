@@ -138,6 +138,39 @@ class MetadataParserTests(unittest.TestCase):
 
         self.assertEqual(result["developer"], "Robin")
 
+    def test_developer_name_cleans_link_variants_and_urls(self):
+        for value in (
+            "Robin Patreon | Steam Page | Discord Server",
+            "Robin SubscribeStar.com • Official Website",
+            "Robin https://www.patreon.com/robin Website",
+            "Breadman Games SubscribeStar - Ko-fi - Website - Discord - Discord Stream",
+        ):
+            with self.subTest(value=value):
+                expected = "Breadman Games" if value.startswith("Breadman Games") else "Robin"
+                self.assertEqual(app.clean_developer_name(value), expected)
+
+    def test_thread_developer_excludes_anchors_regardless_of_link_text(self):
+        source = """
+        <h1 class="p-title-value">Demon Deals</h1>
+        <article class="message--post message-threadStarterPost">
+          <div class="message-body"><div class="bbWrapper">
+            <p><b>Developer:</b> Breadman Games
+              <a href="https://example.com/1">SubscribeStar</a> -
+              <a href="https://example.com/2">Ko-fi</a> -
+              <a href="https://example.com/3">Website</a> -
+              <a href="https://example.com/4">Discord</a> -
+              <a href="https://example.com/5">Discord Stream</a> -
+              <a href="https://example.com/6">Any Other Link Name</a>
+            </p>
+          </div></div>
+        </article>
+        """
+
+        result = app.parse_thread_metadata(source, "https://f95zone.to/threads/demon-deals.123/")
+
+        self.assertEqual(result["developer"], "Breadman Games")
+        self.assertTrue(result["developer_links_removed"])
+
     def test_banner_in_post_is_cover_and_site_logo_og_image_is_ignored(self):
         post = app.HtmlNode("div", {}, None)
         image = app.HtmlNode("img", {
@@ -592,6 +625,29 @@ class GameListingTests(unittest.TestCase):
         games = app.list_games(search="a", sort="name", direction="desc")
         self.assertEqual([game["title"] for game in games], ["Charlie", "Bravo", "Alpha"])
 
+    def test_title_search_and_developer_filter_are_separate(self):
+        with app.database() as db:
+            db.execute(
+                "UPDATE games SET developer = ?, tags = ? WHERE title = ?",
+                ("Studio One", json.dumps(["Mystery Tag"]), "Alpha"),
+            )
+            db.execute(
+                "UPDATE games SET developer = ? WHERE title = ?",
+                ("Studio Two", "Bravo"),
+            )
+
+        self.assertEqual(app.list_games(search="Studio"), [])
+        self.assertEqual(app.list_games(search="Mystery Tag"), [])
+        self.assertEqual([game["title"] for game in app.list_games(search="Alpha")], ["Alpha"])
+        self.assertEqual(
+            [game["title"] for game in app.list_games(developer_search="Studio One")],
+            ["Alpha"],
+        )
+        self.assertEqual(
+            [game["title"] for game in app.list_games(search="Alpha", developer_search="Studio")],
+            ["Alpha"],
+        )
+
     def test_metadata_filters_combine_and_filter_options_list_available_values(self):
         with app.database() as db:
             db.execute(
@@ -939,6 +995,22 @@ class GameListingTests(unittest.TestCase):
             }
         self.assertEqual(developers["Space Rescue: Code Pink"], "Robin")
         self.assertEqual(developers["Custom Game"], "Custom Developer")
+        with app.database() as db:
+            cursor = db.execute(
+                """
+                INSERT INTO games (thread_url, title, developer, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "https://f95zone.to/threads/stale-links.125/",
+                    "Stale Links",
+                    "Robin SubscribeStar.com • Official Website",
+                    "2026-01-01T00:00:00+00:00",
+                    "2026-01-01T00:00:00+00:00",
+                ),
+            )
+            game_id = cursor.lastrowid
+        self.assertEqual(app.get_game(game_id)["developer"], "Robin")
 
 
 class SyncTests(unittest.TestCase):
@@ -1192,6 +1264,30 @@ class SyncTests(unittest.TestCase):
             app.sync_game(1)
         self.assertIsNone(app.get_cached_f95_image("https://attachments.f95zone.to/new-shot.jpg"))
 
+    def test_sync_replaces_existing_developer_when_thread_has_links_in_field(self):
+        with app.database() as db:
+            db.execute("UPDATE games SET developer = ? WHERE id = 1", (
+                "Breadman Games SubscribeStar - Ko-fi - Website - Discord - Discord Stream",
+            ))
+        metadata = {
+            "title": "Test Game",
+            "image_url": "",
+            "gallery": [],
+            "description": "",
+            "developer": "Breadman Games",
+            "developer_links_removed": True,
+            "version": "",
+            "engine": "",
+            "game_status": "",
+            "tags": [],
+            "thread_updated_at": None,
+        }
+
+        with patch.object(app, "fetch_thread_metadata", return_value=metadata):
+            game = app.sync_game(1)
+
+        self.assertEqual(game["developer"], "Breadman Games")
+
     def test_existing_gallery_hides_signed_url_duplicates(self):
         with app.database() as db:
             db.execute(
@@ -1309,6 +1405,7 @@ class SyncTests(unittest.TestCase):
         second_page = app.get_sync_reports(after_id=first_page["next_after_id"], limit=1)
         self.assertEqual(len(first_page["reports"]), 1)
         self.assertTrue(first_page["has_more"])
+        self.assertEqual(first_page["latest_id"], second_page["next_after_id"])
         self.assertEqual(len(second_page["reports"]), 1)
         self.assertFalse(second_page["has_more"])
         self.assertEqual(first_page["epoch"], second_page["epoch"])

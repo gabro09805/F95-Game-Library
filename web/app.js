@@ -28,6 +28,7 @@ const state = {
   filters: {
     include: { game_statuses: [], engines: [], tags: [], personal_statuses: [] },
     exclude: { game_statuses: [], engines: [], tags: [], personal_statuses: [] },
+    developer: "",
   },
   pageView: "library",
   catalog: {
@@ -83,6 +84,7 @@ let syncReportsPollInFlight = false;
 let syncReportsPollFailed = false;
 let syncReportCursor = 0;
 let syncReportEpoch = "";
+let syncReportCursorInitialized = false;
 let syncReportSaveFailed = false;
 let catalogSyncPending = false;
 let syncNoticeTimeout;
@@ -459,6 +461,7 @@ function saveLibrarySort() {
 async function loadGames() {
   const params = new URLSearchParams({
     q: state.search,
+    developer: state.filters.developer,
     status: state.status,
     sort: state.sort,
     direction: state.direction,
@@ -1074,7 +1077,9 @@ function populateQuickStatus(values) {
 }
 
 function updateFilterCount() {
-  const count = Object.values(state.filters.include).flat().length + Object.values(state.filters.exclude).flat().length;
+  const count = Object.values(state.filters.include).flat().length
+    + Object.values(state.filters.exclude).flat().length
+    + Number(Boolean(state.filters.developer));
   const badge = document.querySelector("#filter-count");
   badge.textContent = count;
   badge.classList.toggle("hidden", count === 0);
@@ -1086,6 +1091,7 @@ function cloneFilters(filters) {
   return {
     include: Object.fromEntries(Object.entries(filters.include).map(([key, values]) => [key, [...values]])),
     exclude: Object.fromEntries(Object.entries(filters.exclude).map(([key, values]) => [key, [...values]])),
+    developer: filters.developer || "",
   };
 }
 
@@ -1104,6 +1110,12 @@ function renderFilterSummary() {
         );
       }
     }
+  }
+  if (draftFilters.developer) {
+    chips.push(
+      `<span class="filter-chip">Sviluppatore: ${escapeHtml(draftFilters.developer)}` +
+      '<button type="button" data-clear-developer-filter aria-label="Rimuovi filtro sviluppatore">×</button></span>'
+    );
   }
   summary.innerHTML = chips.join("") || '<span class="filter-summary-empty">Nessun filtro selezionato</span>';
 }
@@ -1140,6 +1152,7 @@ async function openFilters() {
   const options = await api("/api/filters");
   availableFilterOptions = options;
   draftFilters = cloneFilters(state.filters);
+  document.querySelector("#library-developer-search").value = draftFilters.developer;
   populateQuickStatus(options.game_statuses);
   for (const category of Object.keys(filterCategories)) renderLibraryFilterOptions(category);
   renderFilterSummary();
@@ -1599,10 +1612,12 @@ function initializeSyncReportCursor() {
     if (saved && Number.isSafeInteger(saved.cursor) && saved.cursor >= 0 && typeof saved.epoch === "string") {
       syncReportCursor = saved.cursor;
       syncReportEpoch = saved.epoch;
+      syncReportCursorInitialized = true;
     }
   } catch {
     syncReportCursor = 0;
     syncReportEpoch = "";
+    syncReportCursorInitialized = false;
   }
 }
 
@@ -1676,11 +1691,13 @@ async function pollSyncReports() {
     let hasMore = true;
     while (hasMore) {
       const page = await api(`/api/sync/reports?after_id=${cursor}&epoch=${encodeURIComponent(epoch)}`);
-      if (epoch && page.epoch !== epoch) {
+      if (!syncReportCursorInitialized || (epoch && page.epoch !== epoch)) {
         epoch = page.epoch;
-        cursor = 0;
+        cursor = page.latest_id;
         reports.length = 0;
-        hasMore = true;
+        saveSyncReportCursor(cursor, epoch);
+        syncReportCursorInitialized = true;
+        hasMore = false;
         continue;
       }
       epoch = page.epoch;
@@ -1971,6 +1988,10 @@ document.querySelector("#filters-button").addEventListener("click", () => {
 document.querySelector("#filter-tag-search").addEventListener("input", () => renderLibraryFilterOptions("tags"));
 document.querySelector("#library-game-status-search").addEventListener("input", () => renderLibraryFilterOptions("game_statuses"));
 document.querySelector("#library-engine-search").addEventListener("input", () => renderLibraryFilterOptions("engines"));
+document.querySelector("#library-developer-search").addEventListener("input", (event) => {
+  draftFilters.developer = event.currentTarget.value.trim();
+  renderFilterSummary();
+});
 document.querySelector("#close-filters").addEventListener("click", () => filtersModal.close());
 document.querySelector("#quick-f95-status").addEventListener("change", (event) => {
   const value = event.currentTarget.value;
@@ -1992,6 +2013,12 @@ document.querySelector("#filters-form").addEventListener("click", (event) => {
   renderFilterSummary();
 });
 document.querySelector("#filter-summary-list").addEventListener("click", (event) => {
+  if (event.target.closest("[data-clear-developer-filter]")) {
+    draftFilters.developer = "";
+    document.querySelector("#library-developer-search").value = "";
+    renderFilterSummary();
+    return;
+  }
   const removeButton = event.target.closest("[data-remove-filter-mode]");
   if (removeButton) removeDraftFilter(removeButton);
 });
@@ -2000,7 +2027,12 @@ document.querySelector("#filters-form").addEventListener("submit", (event) => {
   applyDraftFilters();
 });
 document.querySelector("#clear-filters").addEventListener("click", () => {
-  draftFilters = { include: { game_statuses: [], engines: [], tags: [], personal_statuses: [] }, exclude: { game_statuses: [], engines: [], tags: [], personal_statuses: [] } };
+  draftFilters = {
+    include: { game_statuses: [], engines: [], tags: [], personal_statuses: [] },
+    exclude: { game_statuses: [], engines: [], tags: [], personal_statuses: [] },
+    developer: "",
+  };
+  document.querySelector("#library-developer-search").value = "";
   for (const [category, config] of Object.entries(filterCategories)) {
     if (config.searchId) document.querySelector(config.searchId).value = "";
     renderLibraryFilterOptions(category);

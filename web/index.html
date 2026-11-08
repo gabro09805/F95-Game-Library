@@ -16,16 +16,16 @@
         </a>
         <div class="side-label">LIBRERIA</div>
         <nav class="status-nav" aria-label="Filtra per stato">
-          <button class="nav-item active" data-status="all"><span class="nav-icon">▦</span>Tutti i giochi<span class="nav-count" id="count-all">0</span></button>
-          <button class="nav-item" data-status="playing"><span class="nav-icon">▶</span>In corso</button>
-          <button class="nav-item" data-status="wishlist"><span class="nav-icon">♡</span>Da giocare</button>
-          <button class="nav-item" data-status="completed"><span class="nav-icon">✓</span>Completati</button>
-          <button class="nav-item" data-status="on_hold"><span class="nav-icon">Ⅱ</span>In pausa</button>
-          <button class="nav-item" data-status="dropped"><span class="nav-icon">×</span>Abbandonati</button>
+          <button class="nav-item active" data-status="all"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="4" width="7" height="7" rx="1"/><rect x="4" y="13" width="7" height="7" rx="1"/><rect x="13" y="13" width="7" height="7" rx="1"/></svg></span>Tutti i giochi<span class="nav-count" id="count-all">0</span></button>
+          <button class="nav-item" data-status="playing"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 5 11 7-11 7z"/></svg></span>In corso</button>
+          <button class="nav-item" data-status="wishlist"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.8 8.7c0 5.2-8.8 10-8.8 10s-8.8-4.8-8.8-10a4.7 4.7 0 0 1 8.8-2.2 4.7 4.7 0 0 1 8.8 2.2Z"/></svg></span>Da giocare</button>
+          <button class="nav-item" data-status="completed"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 4.5 4.5L19 7"/></svg></span>Completati</button>
+          <button class="nav-item" data-status="on_hold"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5v14M15 5v14"/></svg></span>In pausa</button>
+          <button class="nav-item" data-status="dropped"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 6 12 12M18 6 6 18"/></svg></span>Abbandonati</button>
         </nav>
         <div class="side-label catalog-side-label">ESPLORA</div>
         <button type="button" class="nav-item catalog-nav-item" id="catalog-nav-button" aria-label="Apri catalogo F95Zone">
-          <span class="nav-icon">⌕</span>Catalogo F95Zone
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.8" cy="10.8" r="6.3"/><path d="m16 16 4 4"/></svg></span>Catalogo F95Zone
         </button>
         <div class="sidebar-bottom">
           <div class="connection"><span class="pulse"></span><span>Archivio locale</span></div>
@@ -60,7 +60,7 @@
           <div class="search-tools">
             <label class="search-box">
               <span>⌕</span>
-              <input id="search-input" type="search" placeholder="Cerca per titolo, sviluppatore o tag..." autocomplete="off">
+              <input id="search-input" type="search" placeholder="Cerca per titolo..." autocomplete="off">
               <kbd>⌘ K</kbd>
             </label>
             <label class="quick-filter">
@@ -109,6 +109,8 @@
             <div class="catalog-filter-heading">
               <span id="library-filter-counts">Filtri basati sui giochi presenti nella libreria</span>
             </div>
+            <label class="field-label library-developer-filter" for="library-developer-search">SVILUPPATORE</label>
+            <input id="library-developer-search" type="search" placeholder="Cerca uno sviluppatore..." autocomplete="off">
             <section class="catalog-prefix-group library-filter-groups">
               <details open data-library-filter-category="game_statuses">
                 <summary>STATO <span id="library-game-status-count"></span></summary>

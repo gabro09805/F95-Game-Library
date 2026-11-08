@@ -1,6 +1,6 @@
 # F95 Library
 
-Libreria web self-hosted per organizzare i thread di giochi F95Zone. La prima versione importa titolo, copertina, galleria immagini, overview, versione corrente e statistiche del thread quando sono disponibili; consente ricerca, stato personale, commenti e controllo periodico delle modifiche ai thread.
+Libreria web self-hosted per organizzare i thread di giochi F95Zone. La prima versione importa titolo, copertina, galleria immagini, overview, versione corrente e statistiche del thread quando sono disponibili; consente la ricerca per titolo, il filtro per sviluppatore, lo stato personale, i commenti e il controllo periodico delle modifiche ai thread.
 
 Non scarica, installa o avvia giochi. Non è affiliata a F95Zone.
 

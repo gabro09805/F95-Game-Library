@@ -203,11 +203,13 @@ class HtmlNode:
                 yield child
             yield from child.descendants(tag, class_name)
 
-    def text(self, lines=False, skip_hidden=False):
+    def text(self, lines=False, skip_hidden=False, skip_tags=None):
         parts = []
         for child in self.children:
             if isinstance(child, str):
                 parts.append(child)
+                continue
+            if skip_tags and child.tag in skip_tags:
                 continue
             if skip_hidden and (
                 "u-hidden" in child.classes()
@@ -217,7 +219,7 @@ class HtmlNode:
             is_block = child.tag in BLOCK_TAGS
             if lines and is_block and parts and not parts[-1].endswith("\n"):
                 parts.append("\n")
-            parts.append(child.text(lines=lines, skip_hidden=skip_hidden))
+            parts.append(child.text(lines=lines, skip_hidden=skip_hidden, skip_tags=skip_tags))
             if lines and is_block:
                 parts.append("\n")
         return "".join(parts)
@@ -525,15 +527,24 @@ def extract_field(text, labels):
 
 def clean_developer_name(value):
     link_labels = (
-        "Patreon", "SubscribeStar", "Website", "Web site", "Steam", "Discord",
-        "Twitter", "X", "Itch.io", "Gumroad", "Ko-fi", "Kofi", "Reddit",
-        "Tumblr", "Instagram", "YouTube", "Youtube",
+        "SubscribeStar.com", "Subscribe Star", "SubscribeStar", "Official Website",
+        "Discord Stream", "Discord Server", "Steam Page", "Itch.io", "Website",
+        "Web site", "Homepage",
+        "Patreon", "Steam", "Discord", "Twitter", "Itch", "Gumroad", "Ko-fi",
+        "Kofi", "Reddit", "Tumblr", "Instagram", "YouTube", "Youtube", "Linktree",
+        "Pixiv", "Fanbox", "Boosty", "Facebook", "Bluesky", "Subscribe",
     )
     suffix = "|".join(re.escape(label) for label in sorted(link_labels, key=len, reverse=True))
     cleaned = normalize_text(value)
-    while re.search(rf"(?:[\s|·•,;–—-]+)(?:{suffix})\s*$", cleaned, re.I):
-        cleaned = re.sub(rf"(?:[\s|·•,;–—-]+)(?:{suffix})\s*$", "", cleaned, flags=re.I)
-    return cleaned.strip(" \t|·•,;–—-")
+    cleaned = re.sub(r"(?:https?://|www\.)\S+", "", cleaned, flags=re.I)
+    while re.search(rf"(?:[\s|·•,;:()–—-]+)(?:{suffix})\s*:?\s*$", cleaned, re.I):
+        cleaned = re.sub(
+            rf"(?:[\s|·•,;:()–—-]+)(?:{suffix})\s*:?\s*$",
+            "",
+            cleaned,
+            flags=re.I,
+        )
+    return cleaned.strip(" \t|·•,;:()–—-")
 
 
 OVERVIEW_STOP_LABELS = (
@@ -874,6 +885,7 @@ def fetch_catalog_game_details(raw_thread_id):
         raise ValueError("ID del thread non valido.")
     thread_url = f"https://f95zone.to/threads/{thread_id}/"
     metadata = fetch_thread_metadata(thread_url)
+    metadata.pop("developer_links_removed", None)
     return {
         **metadata,
         "thread_id": thread_id,
@@ -1238,9 +1250,22 @@ def parse_thread_metadata(html, thread_url):
     if not title_heading and not og_title and not post_node:
         raise ValueError("La pagina ricevuta non contiene i dati di un thread F95Zone.")
 
+    developer_labels = ["developer", "developers", "creator", "author", "publisher"]
+    linked_post_text = post_body.text(lines=True, skip_hidden=True, skip_tags={"a"}) if post_body else ""
+    linked_post_text = re.sub(r"[ \t]+\n", "\n", linked_post_text)
+    linked_post_text = re.sub(r"\n{2,}", "\n", linked_post_text).strip()
+    full_developer = extract_field(post_text, developer_labels)
+    developer_without_links = extract_field(linked_post_text, developer_labels)
+    developer_links_removed = bool(full_developer and full_developer != developer_without_links)
+    if post_body and not developer_links_removed:
+        developer_links_removed = any(
+            extract_field(node.text(lines=True, skip_hidden=True), developer_labels)
+            and any(node.descendants("a"))
+            for node in post_body.descendants()
+            if node.tag in {"p", "li", "td"}
+        )
     developer = clean_developer_name(
-        extract_field(post_text, ["developer", "developers", "creator", "author", "publisher"])
-        or title_parts["creator"]
+        developer_without_links or title_parts["creator"]
     )
     version = extract_field(post_text, ["version", "release version"]) or title_parts["version"]
     engine = extract_field(post_text, ["engine"])
@@ -1282,6 +1307,7 @@ def parse_thread_metadata(html, thread_url):
         "description": description,
         "thread_updated_at": updated_at or (max(timestamps) if timestamps else None),
         "developer": developer,
+        "developer_links_removed": developer_links_removed,
         "version": version,
         "engine": engine,
         "game_status": game_status,
@@ -2119,6 +2145,7 @@ def initialize_db():
 
 def game_to_dict(row):
     game = dict(row)
+    game["developer"] = clean_developer_name(game.get("developer", ""))
     if not game.get("latest_version"):
         game["latest_version"] = game.get("version", "")
     game.setdefault("user_version", "")
@@ -2209,15 +2236,21 @@ def list_games(
     exclude_engines=None,
     exclude_tags=None,
     exclude_personal_statuses=None,
+    developer_search="",
 ):
     sort_column = GAME_SORT_COLUMNS.get(sort, GAME_SORT_COLUMNS["name"])
     direction = "DESC" if direction == "desc" else "ASC"
+    search = (search or "").strip()[:200]
+    developer_search = (developer_search or "").strip()[:180]
     clauses = []
     params = []
     if search:
         pattern = f"%{search}%"
-        clauses.append("(title LIKE ? OR developer LIKE ? OR tags LIKE ?)")
-        params.extend((pattern, pattern, pattern))
+        clauses.append("title LIKE ?")
+        params.append(pattern)
+    if developer_search:
+        clauses.append("developer LIKE ?")
+        params.append(f"%{developer_search}%")
     if status != "all":
         clauses.append("personal_status = ?")
         params.append(status)
@@ -2309,7 +2342,12 @@ def sync_game(game_id, *, prune_cache=True):
                         f95_rating = COALESCE(?, f95_rating),
                         likes = CASE WHEN ? > 0 THEN ? ELSE likes END,
                         views = CASE WHEN ? > 0 THEN ? ELSE views END,
-                        developer = CASE WHEN developer = '' THEN ? ELSE developer END,
+                        developer = CASE
+                            WHEN ? AND ? != '' THEN ?
+                            WHEN developer = '' THEN ?
+                            WHEN developer != ? THEN ?
+                            ELSE developer
+                        END,
                         engine = CASE WHEN engine = '' THEN ? ELSE engine END,
                         game_status = COALESCE(NULLIF(?, ''), game_status),
                         tags = CASE WHEN tags = '[]' THEN ? ELSE tags END,
@@ -2325,7 +2363,9 @@ def sync_game(game_id, *, prune_cache=True):
                         metadata["version"], metadata["version"], metadata.get("f95_rating"),
                         metadata.get("likes", 0), metadata.get("likes", 0),
                         metadata.get("views", 0), metadata.get("views", 0),
-                        metadata["developer"], metadata["engine"],
+                        int(bool(metadata.get("developer_links_removed"))), metadata["developer"],
+                        metadata["developer"],
+                        metadata["developer"], game["developer"], game["developer"], metadata["engine"],
                         metadata["game_status"], json.dumps(metadata["tags"], ensure_ascii=False),
                         new_timestamp, now_iso(), int(is_newer), now_iso(), game_id,
                     ),
@@ -2423,10 +2463,14 @@ def get_sync_reports(after_id=0, limit=50):
             "SELECT 1 FROM sync_reports WHERE id > ? LIMIT 1",
             (next_after_id,),
         ).fetchone() is not None
+        latest_id = db.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM sync_reports"
+        ).fetchone()[0]
     return {
         "reports": reports,
         "next_after_id": next_after_id,
         "has_more": has_more,
+        "latest_id": latest_id,
         "epoch": read_setting("sync_report_epoch"),
     }
 
@@ -2970,6 +3014,7 @@ class LibraryHandler(SimpleHTTPRequestHandler):
                 query.get("exclude_engine", []),
                 query.get("exclude_tag", []),
                 query.get("exclude_personal_status", []),
+                query.get("developer", [""])[0][:180],
             ))
             return
         if parts.path == "/api/filters":
